@@ -1,0 +1,26 @@
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Node.js / Next.js
+node_modules/
+.next/
+out/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# VS Code
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local database
+postgres_data/
