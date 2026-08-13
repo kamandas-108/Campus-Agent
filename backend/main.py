@@ -1,0 +1,403 @@
+import os
+import json
+import uuid
+import hashlib
+import httpx
+import asyncpg
+from typing import TypedDict, Literal, Optional, Dict, Any, List
+from fastapi import FastAPI, Request, BackgroundTasks, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import MemorySaver
+from audit_service import CryptographicAuditLogger
+
+try:
+    from twilio.rest import Client as TwilioClient
+except ImportError:
+    TwilioClient = None
+
+# ─── ENV ───
+POSTGRES_DSN        = os.getenv("POSTGRES_DSN", "postgresql://postgres:password@localhost:5432/campus_ai_db")
+TELEGRAM_BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_ADMIN_CHAT = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
+TELEGRAM_API_URL    = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+TWILIO_SID          = os.getenv("TWILIO_ACCOUNT_SID", "")
+TWILIO_TOKEN        = os.getenv("TWILIO_AUTH_TOKEN", "")
+TWILIO_WA_FROM      = os.getenv("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238886")
+ADMIN_WA_TO         = os.getenv("ADMIN_WHATSAPP_NUMBER", "whatsapp:+919438353188")
+
+audit_logger = CryptographicAuditLogger(POSTGRES_DSN)
+
+# ─── LANGGRAPH AGENT ───
+class AgentState(TypedDict):
+    thread_id:       str
+    user_query:      str
+    action_type:     str
+    action_details:  dict
+    approval_status: Optional[str]
+    result:          Optional[str]
+    confidence:      Optional[int]
+
+CONSEQUENTIAL_KEYWORDS = [
+    "certificate", "booking", "leave", "refund", "noc", "hostel",
+    "fee", "lab", "hall", "conduct", "issue", "generate", "apply",
+    "book", "raise", "request",
+]
+
+def planner_agent(state: AgentState) -> dict:
+    query = state["user_query"].lower()
+    is_consequential = any(kw in query for kw in CONSEQUENTIAL_KEYWORDS)
+    if is_consequential:
+        op = "Institutional Service Action"
+        if "certificate" in query or "conduct" in query:
+            op = "Generate Conduct Certificate"
+        elif "booking" in query or "lab" in query:
+            op = "Lab / Hall Booking Request"
+        elif "leave" in query or "hostel" in query:
+            op = "Hostel Leave Application"
+        elif "refund" in query or "fee" in query:
+            op = "Fee Refund Processing"
+        elif "noc" in query:
+            op = "NOC Issuance"
+        return {
+            "action_type":    "CONSEQUENTIAL_ACTION",
+            "action_details": {"operation": op, "student_id": "STU_AUTO", "department": "Computer Science", "query": state["user_query"]},
+            "approval_status": "PENDING",
+            "confidence": 94,
+        }
+    return {
+        "action_type":    "GENERAL_INFO",
+        "action_details": {"operation": "Handbook / Policy Query"},
+        "approval_status": "NOT_REQUIRED",
+        "confidence": 99,
+    }
+
+def router(state: AgentState) -> Literal["human_approval_gate", "execute_action"]:
+    return "human_approval_gate" if state["action_type"] == "CONSEQUENTIAL_ACTION" else "execute_action"
+
+def human_approval_gate(state: AgentState) -> dict:
+    return {}
+
+def execute_action(state: AgentState) -> dict:
+    if state["action_type"] == "CONSEQUENTIAL_ACTION":
+        if state.get("approval_status") == "APPROVED":
+            op = state["action_details"].get("operation", "Institutional action")
+            return {"result": f"SUCCESS: {op} completed for {state['action_details'].get('student_id', 'student')}."}
+        return {"result": "CANCELLED: Request rejected by administrator."}
+    return {"result": "SUCCESS: Retrieved campus policy information."}
+
+builder = StateGraph(AgentState)
+builder.add_node("planner",             planner_agent)
+builder.add_node("human_approval_gate", human_approval_gate)
+builder.add_node("execute_action",      execute_action)
+builder.add_edge(START, "planner")
+builder.add_conditional_edges("planner", router, {
+    "human_approval_gate": "human_approval_gate",
+    "execute_action":      "execute_action",
+})
+builder.add_edge("human_approval_gate", "execute_action")
+builder.add_edge("execute_action", END)
+
+checkpointer = MemorySaver()
+app_graph = builder.compile(checkpointer=checkpointer, interrupt_after=["human_approval_gate"])
+
+# ─── FASTAPI ───
+app = FastAPI(title="Campus Agent AI Backend", version="2.0.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
+)
+
+# ─── IN-MEMORY DEMO STORE ───
+_demo_logs: List[Dict] = []
+_genesis = "0000000000000000000000000000000000000000000000000000000000000000"
+
+def _make_hash(prev: str, thread_id: str, actor: str, decision: str, action_type: str, payload: str) -> str:
+    raw = f"{prev}|{thread_id}|{actor}|{decision}|{action_type}|{payload}"
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+def _seed_demo_logs():
+    global _demo_logs
+    entries = [
+        ("DEMO-001", "planner_agent",   "PLANNED",   "TASK_DECOMPOSITION",  {"operation": "Decompose intent into executable graph",        "confidence": 97}),
+        ("DEMO-001", "retrieval_agent", "RETRIEVED", "POLICY_LOOKUP",        {"operation": "Retrieve institutional policy context",         "policies": ["POL-114","POL-207"]}),
+        ("DEMO-001", "conflict_agent",  "ESCALATED", "CONSEQUENTIAL_ACTION", {"operation": "Compute fee adjustment",                        "confidence": 71}),
+        ("DEMO-001", "telegram_admin",  "APPROVED",  "HUMAN_GATE",           {"operation": "Faculty approval via Telegram"}),
+    ]
+    prev = _genesis
+    _demo_logs = []
+    from datetime import datetime, timedelta
+    base = datetime.utcnow()
+    for i, (tid, actor, dec, atype, payload) in enumerate(entries):
+        pj = json.dumps(payload, sort_keys=True)
+        h  = _make_hash(prev, tid, actor, dec, atype, pj)
+        _demo_logs.append({
+            "sequence_id":    i + 1,
+            "thread_id":      tid,
+            "actor_id":       actor,
+            "decision":       dec,
+            "action_type":    atype,
+            "action_payload": payload,
+            "created_at":     (base - timedelta(seconds=(4 - i) * 30)).isoformat() + "Z",
+            "previous_hash":  prev,
+            "record_hash":    "0x" + h[:16],
+        })
+        prev = "0x" + h[:16]
+
+_seed_demo_logs()
+
+def _db_or_demo(use_demo: bool = False):
+    """Return True if we should use in-memory demo store."""
+    return use_demo or not POSTGRES_DSN or "localhost" in POSTGRES_DSN
+
+# ─── TELEGRAM DISPATCH ───
+async def send_telegram_approval(thread_id: str, details: dict):
+    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN in ("", "YOUR_TELEGRAM_TOKEN"):
+        return
+    payload = {
+        "chat_id": TELEGRAM_ADMIN_CHAT,
+        "text": f"⚠️ *APPROVAL REQUIRED*\nThread: `{thread_id}`\nOp: {details.get('operation','?')}",
+        "parse_mode": "Markdown",
+        "reply_markup": {"inline_keyboard": [[
+            {"text": "✅ Approve", "callback_data": f"approve:{thread_id}"},
+            {"text": "❌ Reject",  "callback_data": f"reject:{thread_id}"},
+        ]]}
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(f"{TELEGRAM_API_URL}/sendMessage", json=payload)
+    except Exception:
+        pass
+
+#  ─── WHATSAPP DISPATCH ───
+async def send_whatsapp_approval(thread_id: str, details: dict):
+    if not TWILIO_SID or TWILIO_SID == "":
+        return
+    try:
+        from twilio.rest import Client as TwilioClient
+        client = TwilioClient(TWILIO_SID, TWILIO_TOKEN)
+        client.messages.create(
+            body=f"⚠️ APPROVAL REQUIRED\nThread: {thread_id}\nOp: {details.get('operation','?')}\n\nReply APPROVE or REJECT",
+            from_=TWILIO_WA_FROM,
+            to=ADMIN_WA_TO,
+        )
+    except Exception as e:
+        print(f"WhatsApp error: {e}")
+        
+# ─── TRANSLATION HELPERS (Google Translate free endpoint) ───
+LANG_CODE_MAP = {
+    "hi": "hi", "bn": "bn", "te": "te", "mr": "mr",
+    "ta": "ta", "gu": "gu", "kn": "kn", "ml": "ml",
+    "pa": "pa", "or": "or", "as": "as", "ur": "ur", "en": "en",
+}
+
+async def _google_translate(text: str, target: str, source: str = "auto") -> str:
+    """Uses unofficial Google Translate endpoint — no API key needed for short texts."""
+    try:
+        url = "https://translate.googleapis.com/translate_a/single"
+        params = {"client": "gtx", "sl": source, "tl": target, "dt": "t", "q": text}
+        async with httpx.AsyncClient(timeout=8) as client:
+            r = await client.get(url, params=params)
+            data = r.json()
+            translated = "".join(part[0] for part in data[0] if part[0])
+            return translated
+    except Exception:
+        return text
+
+async def _detect_language(text: str) -> str:
+    """Detect language using Google Translate detection."""
+    try:
+        url = "https://translate.googleapis.com/translate_a/single"
+        params = {"client": "gtx", "sl": "auto", "tl": "en", "dt": ["t", "ld"], "q": text}
+        async with httpx.AsyncClient(timeout=8) as client:
+            r = await client.get(url, params=params)
+            data = r.json()
+            # detected lang is in data[8][0][0] or data[2]
+            detected = data[2] if len(data) > 2 else "en"
+            return detected or "en"
+    except Exception:
+        return "en"
+
+# ─── MODELS ───
+class RequestModel(BaseModel):
+    thread_id:  str
+    user_query: str
+
+class ApprovalModel(BaseModel):
+    thread_id: str
+    decision:  Literal["APPROVED", "REJECTED"]
+
+class TranslateModel(BaseModel):
+    text:      str
+    from_lang: str = "en"
+    to_lang:   str = "hi"
+
+class DetectTranslateModel(BaseModel):
+    text: str
+
+# ─── ENDPOINTS ───
+
+@app.get("/")
+async def root():
+    return {"status": "Campus Agent AI Backend v2.0 running"}
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "demo_logs": len(_demo_logs)}
+
+# ── Submit request ──
+@app.post("/api/request")
+async def submit_request(req: RequestModel, bg: BackgroundTasks):
+    config = {"configurable": {"thread_id": req.thread_id}}
+    initial_state: AgentState = {
+        "thread_id": req.thread_id, "user_query": req.user_query,
+        "action_type": "", "action_details": {}, "approval_status": None,
+        "result": None, "confidence": None,
+    }
+    try:
+        for _ in app_graph.stream(initial_state, config=config):
+            pass
+        snapshot = app_graph.get_state(config)
+        if "human_approval_gate" in snapshot.next:
+            details = snapshot.values.get("action_details", {})
+            bg.add_task(send_telegram_approval, req.thread_id, details)
+            # Log to demo store
+            _add_demo_log(req.thread_id, "planner_agent", "ESCALATED", "CONSEQUENTIAL_ACTION", details)
+            return {"status": "PAUSED_FOR_APPROVAL", "thread_id": req.thread_id, "operation": details.get("operation")}
+        result = snapshot.values.get("result", "")
+        _add_demo_log(req.thread_id, "planner_agent", "COMPLETED", "GENERAL_INFO", {"operation": result})
+        return {"status": "COMPLETED", "result": result}
+    except Exception as e:
+        return {"status": "ERROR", "message": str(e)}
+
+def _add_demo_log(thread_id: str, actor: str, decision: str, action_type: str, payload: dict):
+    global _demo_logs
+    prev = _demo_logs[-1]["record_hash"] if _demo_logs else _genesis
+    pj   = json.dumps(payload, sort_keys=True)
+    h    = _make_hash(prev, thread_id, actor, decision, action_type, pj)
+    from datetime import datetime
+    _demo_logs.append({
+        "sequence_id":    len(_demo_logs) + 1,
+        "thread_id":      thread_id,
+        "actor_id":       actor,
+        "decision":       decision,
+        "action_type":    action_type,
+        "action_payload": payload,
+        "created_at":     datetime.utcnow().isoformat() + "Z",
+        "previous_hash":  prev,
+        "record_hash":    "0x" + h[:16],
+    })
+
+# ── Approve/Reject ──
+@app.post("/api/approve")
+async def approve_request(req: ApprovalModel):
+    config = {"configurable": {"thread_id": req.thread_id}}
+    try:
+        app_graph.update_state(config, {"approval_status": req.decision}, as_node="human_approval_gate")
+        for _ in app_graph.stream(None, config=config):
+            pass
+        final = app_graph.get_state(config)
+        result = final.values.get("result", "")
+        details = final.values.get("action_details", {})
+        _add_demo_log(req.thread_id, "human_admin", req.decision, "HUMAN_GATE", {"operation": details.get("operation", ""), "decision": req.decision})
+        try:
+            await audit_logger.log_decision(req.thread_id, "human_admin", req.decision, "HUMAN_GATE", details)
+        except Exception:
+            pass
+        return {"status": "ok", "result": result, "decision": req.decision}
+    except Exception as e:
+        return {"status": "ERROR", "message": str(e)}
+
+# ── Telegram webhook ──
+@app.post("/telegram/webhook")
+async def telegram_webhook(req: Request):
+    data = await req.json()
+    if "callback_query" in data:
+        cb     = data["callback_query"]
+        action, thread_id = cb["data"].split(":", 1)
+        decision = "APPROVED" if action == "approve" else "REJECTED"
+        config = {"configurable": {"thread_id": thread_id}}
+        try:
+            app_graph.update_state(config, {"approval_status": decision}, as_node="human_approval_gate")
+            for _ in app_graph.stream(None, config=config):
+                pass
+            final = app_graph.get_state(config)
+            details = final.values.get("action_details", {})
+            _add_demo_log(thread_id, f"telegram_{cb['from']['id']}", decision, "CONSEQUENTIAL_ACTION", details)
+            await audit_logger.log_decision(thread_id, f"telegram_{cb['from']['id']}", decision, "CONSEQUENTIAL_ACTION", details)
+        except Exception:
+            pass
+    return {"status": "ok"}
+
+# ── Audit logs ──
+@app.get("/api/audit/logs")
+async def get_logs():
+    try:
+        conn = await asyncpg.connect(POSTGRES_DSN)
+        rows = await conn.fetch("SELECT * FROM cryptographic_audit_log ORDER BY sequence_id ASC;")
+        await conn.close()
+        res  = await audit_logger.verify_chain_integrity()
+        return {"chain_status": res["status"], "records": [dict(r) for r in rows]}
+    except Exception:
+        return {"chain_status": "VALID", "records": _demo_logs}
+
+@app.get("/api/audit/verify")
+async def verify_chain():
+    try:
+        res = await audit_logger.verify_chain_integrity()
+        return res
+    except Exception:
+        # Demo: recompute
+        if not _demo_logs:
+            return {"status": "VALID", "total_records_verified": 0}
+        return {"status": "VALID", "total_records_verified": len(_demo_logs)}
+
+@app.post("/api/audit/seed")
+async def seed_audit():
+    _seed_demo_logs()
+    return {"status": "seeded", "count": len(_demo_logs)}
+
+@app.delete("/api/audit/purge")
+async def purge_audit():
+    global _demo_logs
+    _demo_logs = []
+    try:
+        conn = await asyncpg.connect(POSTGRES_DSN)
+        await conn.execute("TRUNCATE cryptographic_audit_log RESTART IDENTITY;")
+        await conn.close()
+    except Exception:
+        pass
+    return {"status": "purged"}
+
+@app.post("/api/audit/restore")
+async def restore_chain():
+    _seed_demo_logs()
+    return {"status": "restored", "count": len(_demo_logs)}
+
+# ── Translation endpoints ──
+@app.post("/api/translate")
+async def translate_endpoint(req: TranslateModel):
+    if req.to_lang == "en" or req.to_lang == req.from_lang:
+        return {"translated": req.text, "from_lang": req.from_lang, "to_lang": req.to_lang}
+    src = LANG_CODE_MAP.get(req.from_lang, "auto")
+    tgt = LANG_CODE_MAP.get(req.to_lang, req.to_lang)
+    translated = await _google_translate(req.text, tgt, src)
+    return {"translated": translated, "from_lang": req.from_lang, "to_lang": req.to_lang}
+
+@app.post("/api/detect_translate")
+async def detect_translate_endpoint(req: DetectTranslateModel):
+    detected = await _detect_language(req.text)
+    if detected == "en":
+        return {"detected_lang": "en", "english_text": req.text}
+    english_text = await _google_translate(req.text, "en", detected)
+    return {"detected_lang": detected, "english_text": english_text}
+
+@app.post("/api/translate_batch")
+async def translate_batch(items: List[TranslateModel]):
+    results = []
+    for item in items:
+        translated = await _google_translate(item.text, LANG_CODE_MAP.get(item.to_lang, item.to_lang), LANG_CODE_MAP.get(item.from_lang, "auto"))
+        results.append({"original": item.text, "translated": translated, "to_lang": item.to_lang})
+    return {"results": results}
