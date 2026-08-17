@@ -425,7 +425,7 @@ const POLICY_CORPUS: PolicyEntry[] = [
       },
       {
         heading: "Outcome",
-        body: "Approved refund claims are processed to the student’s official account and documented through a formal acknowledgment or email confirmation.",
+        body: "Approved refund claims are processed to the student's official account and documented through a formal acknowledgment or email confirmation.",
       },
     ],
   },
@@ -559,6 +559,26 @@ function Toast({ t, onClose }: { t: ToastItem; onClose: () => void }) {
   );
 }
 
+const USER_STORAGE_KEY = "campus_agent_user";
+
+function mapBackendRequest(r: any): Request {
+  return {
+    id: r.id || r.thread_id,
+    userId: r.student_email || "",
+    query: r.query || "",
+    status: (r.status || "pending").toLowerCase() as Request["status"],
+    createdAt: r.created_at ? new Date(r.created_at) : new Date(),
+    threadId: r.thread_id || r.id,
+    details: r.result || r.operation || "Processing...",
+    studentName: r.student_name,
+    studentEmail: r.student_email,
+    studentWhatsapp: r.student_whatsapp,
+    studentProgram: r.course_program,
+    studentYear: r.academic_year,
+    studentRollNo: r.roll_number,
+  };
+}
+
 export default function CampusAgentApp() {
   const [view, setView] = useState<"login" | "student" | "faculty">("login");
   const [loginRole, setLoginRole] = useState<"student" | "faculty" | null>(null);
@@ -599,6 +619,53 @@ export default function CampusAgentApp() {
   }, []);
 
   const rmToast = useCallback((id: string) => setToasts((p) => p.filter((x) => x.id !== id)), []);
+
+  // ─── Restore session from localStorage on first load ───
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem(USER_STORAGE_KEY);
+      if (saved) {
+        const parsed: User = JSON.parse(saved);
+        if (parsed && parsed.role) {
+          setUser(parsed);
+          setView(parsed.role === "student" ? "student" : "faculty");
+        }
+      }
+    } catch {
+      // ignore corrupted storage
+    }
+  }, []);
+
+  // ─── Fetch requests from the backend (source of truth) ───
+  const fetchRequests = useCallback(async (activeUser: User | null) => {
+    if (!activeUser) return;
+    try {
+      const url =
+        activeUser.role === "student"
+          ? `${API}/api/requests?student_email=${encodeURIComponent(activeUser.email)}`
+          : `${API}/api/requests`;
+      const res = await fetch(url);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (Array.isArray(data.requests)) {
+        setRequests(data.requests.map(mapBackendRequest));
+      }
+    } catch {
+      // network hiccup — keep the last known list, next poll will retry
+    }
+  }, []);
+
+  // ─── Poll the backend so student and faculty dashboards always agree ───
+  useEffect(() => {
+    if ((view !== "student" && view !== "faculty") || !user) return;
+
+    void fetchRequests(user);
+    const interval = window.setInterval(() => {
+      void fetchRequests(user);
+    }, 5000);
+
+    return () => window.clearInterval(interval);
+  }, [view, user, fetchRequests]);
 
   const handleVoiceInput = useCallback(() => {
     const SpeechRecognitionCtor = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -655,6 +722,11 @@ export default function CampusAgentApp() {
 
     setUser(newUser);
     setView(loginRole === "student" ? "student" : "faculty");
+    try {
+      window.localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(newUser));
+    } catch {
+      // storage may be unavailable (private mode) — session just won't persist
+    }
     addToast(`${t.login} successful!`, "success");
 
     setEmail("");
@@ -716,23 +788,9 @@ export default function CampusAgentApp() {
       });
 
       if (res.ok) {
-        const data = await res.json();
-        const newReq: Request = {
-          id: Math.random().toString(36).slice(2),
-          userId: user.id,
-          query,
-          status: data.status === "COMPLETED" ? "approved" : "pending",
-          createdAt: new Date(),
-          threadId,
-          details: data.result || data.operation || "Processing...",
-          studentName: user.name,
-          studentEmail: user.email,
-          studentWhatsapp: user.whatsapp,
-          studentProgram: user.courseProgram,
-          studentYear: user.academicYear,
-          studentRollNo: user.rollNumber,
-        };
-        setRequests((p) => [newReq, ...p]);
+        // The backend is now the source of truth — pull the fresh list
+        // instead of guessing the shape of the new record locally.
+        await fetchRequests(user);
         addNotification("Request submitted", `Faculty alert for ${threadId} has been queued.`, "system");
         addToast(t.submitted, "success");
         setQuery("");
@@ -744,7 +802,7 @@ export default function CampusAgentApp() {
     }
 
     setSubmitting(false);
-  }, [addToast, lang, query, t, user]);
+  }, [addNotification, addToast, fetchRequests, lang, query, t, user]);
 
   const handleApproval = useCallback(async (reqId: string, decision: "APPROVED" | "REJECTED") => {
     const req = requests.find((r) => r.id === reqId);
@@ -766,6 +824,7 @@ export default function CampusAgentApp() {
 
       const responseJson = approvalRes.ok ? await approvalRes.json() : null;
 
+      // Optimistic local update so the faculty view reacts instantly...
       setRequests((p) =>
         p.map((r) =>
           r.id === reqId
@@ -777,6 +836,8 @@ export default function CampusAgentApp() {
             : r
         )
       );
+      // ...then re-sync with the backend so every open dashboard agrees.
+      void fetchRequests(user);
 
       if (decision === "APPROVED") {
         const notice = `Campus Approval Notice\n\nRequest: ${req.query}\nStudent: ${req.studentName || user?.name || "Student"}\nProgram: ${req.studentProgram || user?.courseProgram || "Not provided"}\nYear: ${req.studentYear || user?.academicYear || "Not provided"}\nRoll/Registration No: ${req.studentRollNo || user?.rollNumber || "Not provided"}\nStatus: Approved\n\nThis is an official institutional approval notice. Please keep it for records and use it as needed for your academic or administrative requirement.`;
@@ -797,7 +858,7 @@ export default function CampusAgentApp() {
     } catch {
       addToast("Error updating approval", "error");
     }
-  }, [addToast, requests, t, user]);
+  }, [addNotification, addToast, fetchRequests, requests, t, user]);
 
   const handleLogout = useCallback(() => {
     setUser(null);
@@ -805,6 +866,11 @@ export default function CampusAgentApp() {
     setLoginRole(null);
     setRequests([]);
     setQuery("");
+    try {
+      window.localStorage.removeItem(USER_STORAGE_KEY);
+    } catch {
+      // ignore
+    }
     addToast("Logout successful", "info");
   }, [addToast]);
 
@@ -930,7 +996,7 @@ export default function CampusAgentApp() {
   }
 
   if (view === "student" && user) {
-    const studentRequests = requests.filter((req) => req.userId === user.id);
+    const studentRequests = requests.filter((req) => req.studentEmail === user.email);
 
     return (
       <div className="min-h-screen text-slate-100 font-sans" style={{ background: "linear-gradient(135deg, #0a0f1e 0%, #1a0f2e 100%)" }}>
