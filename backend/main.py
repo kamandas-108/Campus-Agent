@@ -4,6 +4,7 @@ import uuid
 import hashlib
 import httpx
 import asyncpg
+from datetime import datetime
 from typing import TypedDict, Literal, Optional, Dict, Any, List, cast
 from fastapi import FastAPI, Request, BackgroundTasks, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -132,7 +133,15 @@ app.add_middleware(
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
-# ─── IN-MEMORY DEMO STORE ───
+# ─── REQUEST STORE (source of truth so student & faculty dashboards agree) ───
+# Keyed by thread_id. This is what /api/request writes to and /api/requests
+# reads from, and what /api/approve updates. It is still in-memory (see the
+# note at the bottom of this file about swapping this for the database before
+# a real deploy), but unlike before, both the student and faculty UIs now
+# read from this single shared store instead of separate local React state.
+_requests_store: Dict[str, Dict[str, Any]] = {}
+
+# ─── IN-MEMORY DEMO STORE (audit ledger demo data — unrelated to requests) ───
 _demo_logs: List[Dict] = []
 _genesis = "0000000000000000000000000000000000000000000000000000000000000000"
 
@@ -289,7 +298,7 @@ async def send_email_approval(thread_id: str, details: dict):
         await fm.send_message(message)
     except Exception as e:
         print(f"Email error: {e}")
-        
+
 # ─── TRANSLATION HELPERS (Google Translate free endpoint) ───
 LANG_CODE_MAP = {
     "hi": "hi", "bn": "bn", "te": "te", "mr": "mr",
@@ -359,7 +368,7 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "demo_logs": len(_demo_logs)}
+    return {"status": "ok", "demo_logs": len(_demo_logs), "requests": len(_requests_store)}
 
 # ── Submit request ──
 @app.post("/api/request")
@@ -370,6 +379,22 @@ async def submit_request(req: RequestModel, bg: BackgroundTasks):
         "action_type": "", "action_details": {}, "approval_status": None,
         "result": None, "confidence": None,
     }
+
+    # Base record for the shared request store — this is what both the
+    # student and faculty dashboards will read back via GET /api/requests.
+    base_entry: Dict[str, Any] = {
+        "id": req.thread_id,
+        "thread_id": req.thread_id,
+        "student_name": req.student_name,
+        "student_email": req.student_email,
+        "student_whatsapp": req.student_whatsapp,
+        "course_program": req.course_program,
+        "academic_year": req.academic_year,
+        "roll_number": req.roll_number,
+        "query": req.user_query,
+        "created_at": datetime.utcnow().isoformat() + "Z",
+    }
+
     try:
         for _ in app_graph.stream(initial_state, config=config):
             pass
@@ -388,9 +413,28 @@ async def submit_request(req: RequestModel, bg: BackgroundTasks):
             bg.add_task(send_whatsapp_approval, req.thread_id, details)
             bg.add_task(send_email_approval,    req.thread_id, details)
             _add_demo_log(req.thread_id, "planner_agent", "ESCALATED", "CONSEQUENTIAL_ACTION", details)
+
+            base_entry.update({
+                "status": "PENDING",
+                "operation": details.get("operation"),
+                "result": None,
+            })
+            _requests_store[req.thread_id] = base_entry
+
             return {"status": "PAUSED_FOR_APPROVAL", "thread_id": req.thread_id, "operation": details.get("operation")}
+
         result = snapshot.values.get("result", "")
         _add_demo_log(req.thread_id, "planner_agent", "COMPLETED", "GENERAL_INFO", {"operation": result})
+
+        # General info queries need no human gate — record them as already
+        # resolved so they still show up (as completed) in either dashboard.
+        base_entry.update({
+            "status": "APPROVED",
+            "operation": "Handbook / Policy Query",
+            "result": result,
+        })
+        _requests_store[req.thread_id] = base_entry
+
         return {"status": "COMPLETED", "result": result}
     except Exception as e:
         return {"status": "ERROR", "message": str(e)}
@@ -400,7 +444,6 @@ def _add_demo_log(thread_id: str, actor: str, decision: str, action_type: str, p
     prev = _demo_logs[-1]["record_hash"] if _demo_logs else _genesis
     pj   = json.dumps(payload, sort_keys=True)
     h    = _make_hash(prev, thread_id, actor, decision, action_type, pj)
-    from datetime import datetime
     _demo_logs.append({
         "sequence_id":    len(_demo_logs) + 1,
         "thread_id":      thread_id,
@@ -412,6 +455,15 @@ def _add_demo_log(thread_id: str, actor: str, decision: str, action_type: str, p
         "previous_hash":  prev,
         "record_hash":    "0x" + h[:16],
     })
+
+# ── List requests (shared source of truth for student + faculty dashboards) ──
+@app.get("/api/requests")
+async def get_requests(student_email: Optional[str] = Query(default=None)):
+    items = list(_requests_store.values())
+    if student_email:
+        items = [r for r in items if r.get("student_email") == student_email]
+    items.sort(key=lambda r: r.get("created_at", ""), reverse=True)
+    return {"requests": items}
 
 # ── Approve/Reject ──
 @app.post("/api/approve")
@@ -435,6 +487,30 @@ async def approve_request(req: ApprovalModel):
             await audit_logger.log_decision(req.thread_id, "human_admin", req.decision, "HUMAN_GATE", details)
         except Exception:
             pass
+
+        # Keep the shared request store in sync so every open dashboard
+        # (student or faculty) reflects this decision on its next poll.
+        new_status = "APPROVED" if req.decision == "APPROVED" else "REJECTED"
+        stored = _requests_store.get(req.thread_id)
+        if stored:
+            stored["status"] = new_status
+            stored["result"] = result
+        else:
+            # Defensive fallback: approve was called for a thread we never
+            # saw in /api/request (e.g. server restarted). Still record it
+            # so the dashboards have something to show.
+            _requests_store[req.thread_id] = {
+                "id": req.thread_id,
+                "thread_id": req.thread_id,
+                "student_name": req.student_name,
+                "student_email": req.student_email,
+                "student_whatsapp": req.student_whatsapp,
+                "query": req.request_summary or details.get("operation", ""),
+                "status": new_status,
+                "operation": details.get("operation", ""),
+                "result": result,
+                "created_at": datetime.utcnow().isoformat() + "Z",
+            }
 
         if req.decision == "APPROVED":
             await send_student_approval_notice(
@@ -467,6 +543,12 @@ async def telegram_webhook(req: Request):
             details = final.values.get("action_details", {})
             _add_demo_log(thread_id, f"telegram_{cb['from']['id']}", decision, "CONSEQUENTIAL_ACTION", details)
             await audit_logger.log_decision(thread_id, f"telegram_{cb['from']['id']}", decision, "CONSEQUENTIAL_ACTION", details)
+
+            # Keep the shared request store in sync from the Telegram path too.
+            stored = _requests_store.get(thread_id)
+            if stored:
+                stored["status"] = "APPROVED" if decision == "APPROVED" else "REJECTED"
+                stored["result"] = final.values.get("result", stored.get("result"))
         except Exception:
             pass
     return {"status": "ok"}
@@ -541,3 +623,11 @@ async def translate_batch(items: List[TranslateModel]):
         translated = await _google_translate(item.text, LANG_CODE_MAP.get(item.to_lang, item.to_lang), LANG_CODE_MAP.get(item.from_lang, "auto"))
         results.append({"original": item.text, "translated": translated, "to_lang": item.to_lang})
     return {"results": results}
+
+# ─── NOTE ON PERSISTENCE ───
+# _requests_store and _demo_logs are still process memory: they reset on a
+# Render restart/redeploy. That's fine for local testing, but before a real
+# deploy this should be swapped for a `requests` table in the same Postgres
+# database CryptographicAuditLogger already uses, with get_requests()/
+# submit_request()/approve_request() reading and writing rows instead of
+# the in-memory dict.
