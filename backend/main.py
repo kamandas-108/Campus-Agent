@@ -1,9 +1,7 @@
 import os
 import json
 import uuid
-import hashlib
 import httpx
-import asyncpg
 from datetime import datetime
 from typing import TypedDict, Literal, Optional, Dict, Any, List, cast
 from fastapi import FastAPI, Request, BackgroundTasks, HTTPException, Query
@@ -140,48 +138,6 @@ app.add_middleware(
 # a real deploy), but unlike before, both the student and faculty UIs now
 # read from this single shared store instead of separate local React state.
 _requests_store: Dict[str, Dict[str, Any]] = {}
-
-# ─── IN-MEMORY DEMO STORE (audit ledger demo data — unrelated to requests) ───
-_demo_logs: List[Dict] = []
-_genesis = "0000000000000000000000000000000000000000000000000000000000000000"
-
-def _make_hash(prev: str, thread_id: str, actor: str, decision: str, action_type: str, payload: str) -> str:
-    raw = f"{prev}|{thread_id}|{actor}|{decision}|{action_type}|{payload}"
-    return hashlib.sha256(raw.encode()).hexdigest()
-
-def _seed_demo_logs():
-    global _demo_logs
-    entries = [
-        ("DEMO-001", "planner_agent",   "PLANNED",   "TASK_DECOMPOSITION",  {"operation": "Decompose intent into executable graph",        "confidence": 97}),
-        ("DEMO-001", "retrieval_agent", "RETRIEVED", "POLICY_LOOKUP",        {"operation": "Retrieve institutional policy context",         "policies": ["POL-114","POL-207"]}),
-        ("DEMO-001", "conflict_agent",  "ESCALATED", "CONSEQUENTIAL_ACTION", {"operation": "Compute fee adjustment",                        "confidence": 71}),
-        ("DEMO-001", "telegram_admin",  "APPROVED",  "HUMAN_GATE",           {"operation": "Faculty approval via Telegram"}),
-    ]
-    prev = _genesis
-    _demo_logs = []
-    from datetime import datetime, timedelta
-    base = datetime.utcnow()
-    for i, (tid, actor, dec, atype, payload) in enumerate(entries):
-        pj = json.dumps(payload, sort_keys=True)
-        h  = _make_hash(prev, tid, actor, dec, atype, pj)
-        _demo_logs.append({
-            "sequence_id":    i + 1,
-            "thread_id":      tid,
-            "actor_id":       actor,
-            "decision":       dec,
-            "action_type":    atype,
-            "action_payload": payload,
-            "created_at":     (base - timedelta(seconds=(4 - i) * 30)).isoformat() + "Z",
-            "previous_hash":  prev,
-            "record_hash":    "0x" + h[:16],
-        })
-        prev = "0x" + h[:16]
-
-_seed_demo_logs()
-
-def _db_or_demo(use_demo: bool = False):
-    """Return True if we should use in-memory demo store."""
-    return use_demo or not POSTGRES_DSN or "localhost" in POSTGRES_DSN
 
 # ─── TELEGRAM DISPATCH ───
 async def send_telegram_approval(thread_id: str, details: dict):
@@ -368,7 +324,7 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "demo_logs": len(_demo_logs), "requests": len(_requests_store)}
+    return {"status": "ok", "requests": len(_requests_store)}
 
 # ── Submit request ──
 @app.post("/api/request")
@@ -412,7 +368,10 @@ async def submit_request(req: RequestModel, bg: BackgroundTasks):
             bg.add_task(send_telegram_approval, req.thread_id, details)
             bg.add_task(send_whatsapp_approval, req.thread_id, details)
             bg.add_task(send_email_approval,    req.thread_id, details)
-            _add_demo_log(req.thread_id, "planner_agent", "ESCALATED", "CONSEQUENTIAL_ACTION", details)
+            try:
+                await audit_logger.log_decision(req.thread_id, "planner_agent", "ESCALATED", "CONSEQUENTIAL_ACTION", details)
+            except Exception:
+                pass
 
             base_entry.update({
                 "status": "PENDING",
@@ -424,7 +383,10 @@ async def submit_request(req: RequestModel, bg: BackgroundTasks):
             return {"status": "PAUSED_FOR_APPROVAL", "thread_id": req.thread_id, "operation": details.get("operation")}
 
         result = snapshot.values.get("result", "")
-        _add_demo_log(req.thread_id, "planner_agent", "COMPLETED", "GENERAL_INFO", {"operation": result})
+        try:
+            await audit_logger.log_decision(req.thread_id, "planner_agent", "COMPLETED", "GENERAL_INFO", {"operation": result})
+        except Exception:
+            pass
 
         # General info queries need no human gate — record them as already
         # resolved so they still show up (as completed) in either dashboard.
@@ -438,23 +400,6 @@ async def submit_request(req: RequestModel, bg: BackgroundTasks):
         return {"status": "COMPLETED", "result": result}
     except Exception as e:
         return {"status": "ERROR", "message": str(e)}
-
-def _add_demo_log(thread_id: str, actor: str, decision: str, action_type: str, payload: dict):
-    global _demo_logs
-    prev = _demo_logs[-1]["record_hash"] if _demo_logs else _genesis
-    pj   = json.dumps(payload, sort_keys=True)
-    h    = _make_hash(prev, thread_id, actor, decision, action_type, pj)
-    _demo_logs.append({
-        "sequence_id":    len(_demo_logs) + 1,
-        "thread_id":      thread_id,
-        "actor_id":       actor,
-        "decision":       decision,
-        "action_type":    action_type,
-        "action_payload": payload,
-        "created_at":     datetime.utcnow().isoformat() + "Z",
-        "previous_hash":  prev,
-        "record_hash":    "0x" + h[:16],
-    })
 
 # ── List requests (shared source of truth for student + faculty dashboards) ──
 @app.get("/api/requests")
@@ -482,7 +427,6 @@ async def approve_request(req: ApprovalModel):
             "student_whatsapp": req.student_whatsapp,
             "request_summary": req.request_summary,
         })
-        _add_demo_log(req.thread_id, "human_admin", req.decision, "HUMAN_GATE", {"operation": details.get("operation", ""), "decision": req.decision, "student_name": req.student_name})
         try:
             await audit_logger.log_decision(req.thread_id, "human_admin", req.decision, "HUMAN_GATE", details)
         except Exception:
@@ -541,8 +485,7 @@ async def telegram_webhook(req: Request):
                 pass
             final = app_graph.get_state(config)
             details = final.values.get("action_details", {})
-            _add_demo_log(thread_id, f"telegram_{cb['from']['id']}", decision, "CONSEQUENTIAL_ACTION", details)
-            await audit_logger.log_decision(thread_id, f"telegram_{cb['from']['id']}", decision, "CONSEQUENTIAL_ACTION", details)
+            await audit_logger.log_decision(thread_id, f"telegram_{cb['from']['id']}", decision, "HUMAN_GATE", details)
 
             # Keep the shared request store in sync from the Telegram path too.
             stored = _requests_store.get(thread_id)
@@ -554,49 +497,30 @@ async def telegram_webhook(req: Request):
     return {"status": "ok"}
 
 # ── Audit logs ──
+# These now read exclusively from CryptographicAuditLogger, which is backed
+# by Postgres when reachable and by a real (never-seeded) in-memory chain
+# otherwise. Every record shown here corresponds to an actual request
+# escalation or an actual faculty decision — there is no placeholder data.
 @app.get("/api/audit/logs")
 async def get_logs():
-    try:
-        conn = await asyncpg.connect(POSTGRES_DSN)
-        rows = await conn.fetch("SELECT * FROM cryptographic_audit_log ORDER BY sequence_id ASC;")
-        await conn.close()
-        res  = await audit_logger.verify_chain_integrity()
-        return {"chain_status": res["status"], "records": [dict(r) for r in rows]}
-    except Exception:
-        return {"chain_status": "VALID", "records": _demo_logs}
+    data = await audit_logger.get_records()
+    verify = await audit_logger.verify_chain_integrity()
+    return {
+        "chain_status": verify.get("status", "VALID"),
+        "records": data.get("records", []),
+        "source": data.get("source"),
+    }
 
 @app.get("/api/audit/verify")
 async def verify_chain():
-    try:
-        res = await audit_logger.verify_chain_integrity()
-        return res
-    except Exception:
-        # Demo: recompute
-        if not _demo_logs:
-            return {"status": "VALID", "total_records_verified": 0}
-        return {"status": "VALID", "total_records_verified": len(_demo_logs)}
-
-@app.post("/api/audit/seed")
-async def seed_audit():
-    _seed_demo_logs()
-    return {"status": "seeded", "count": len(_demo_logs)}
+    return await audit_logger.verify_chain_integrity()
 
 @app.delete("/api/audit/purge")
 async def purge_audit():
-    global _demo_logs
-    _demo_logs = []
-    try:
-        conn = await asyncpg.connect(POSTGRES_DSN)
-        await conn.execute("TRUNCATE cryptographic_audit_log RESTART IDENTITY;")
-        await conn.close()
-    except Exception:
-        pass
+    """Clears the real audit trail. For local development/testing only —
+    this permanently removes ledger history."""
+    await audit_logger.purge()
     return {"status": "purged"}
-
-@app.post("/api/audit/restore")
-async def restore_chain():
-    _seed_demo_logs()
-    return {"status": "restored", "count": len(_demo_logs)}
 
 # ── Translation endpoints ──
 @app.post("/api/translate")
@@ -625,9 +549,10 @@ async def translate_batch(items: List[TranslateModel]):
     return {"results": results}
 
 # ─── NOTE ON PERSISTENCE ───
-# _requests_store and _demo_logs are still process memory: they reset on a
-# Render restart/redeploy. That's fine for local testing, but before a real
-# deploy this should be swapped for a `requests` table in the same Postgres
-# database CryptographicAuditLogger already uses, with get_requests()/
+# _requests_store is still process memory: it resets on a Render
+# restart/redeploy. The audit ledger (CryptographicAuditLogger) already
+# degrades gracefully to Postgres-when-reachable, in-memory-otherwise, but
+# for a real deploy _requests_store should get the same treatment — a
+# `requests` table in the same Postgres database, with get_requests()/
 # submit_request()/approve_request() reading and writing rows instead of
 # the in-memory dict.
