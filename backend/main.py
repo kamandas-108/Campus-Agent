@@ -399,7 +399,7 @@ async def submit_request(req: RequestModel, bg: BackgroundTasks):
         for _ in app_graph.stream(initial_state, config=config):
             pass
         snapshot = app_graph.get_state(config)
-        if "human_approval_gate" in snapshot.next:
+        if "execute_action" in snapshot.next:
             details = dict(snapshot.values.get("action_details", {}))
             details.update({
                 "student_name": req.student_name,
