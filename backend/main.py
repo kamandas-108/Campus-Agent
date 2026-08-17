@@ -4,14 +4,16 @@ import uuid
 import hashlib
 import httpx
 import asyncpg
-from typing import TypedDict, Literal, Optional, Dict, Any, List
+from typing import TypedDict, Literal, Optional, Dict, Any, List, cast
 from fastapi import FastAPI, Request, BackgroundTasks, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretStr
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
+from langchain_core.runnables.config import RunnableConfig
 from audit_service import CryptographicAuditLogger
+from fastapi_mail import FastMail, MessageSchema, ConnectionConfig, MessageType
 
 try:
     from twilio.rest import Client as TwilioClient
@@ -27,6 +29,26 @@ TWILIO_SID          = os.getenv("TWILIO_ACCOUNT_SID", "")
 TWILIO_TOKEN        = os.getenv("TWILIO_AUTH_TOKEN", "")
 TWILIO_WA_FROM      = os.getenv("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238886")
 ADMIN_WA_TO         = os.getenv("ADMIN_WHATSAPP_NUMBER", "whatsapp:+919438353188")
+MAIL_USERNAME       = os.getenv("MAIL_USERNAME", "")
+MAIL_PASSWORD       = os.getenv("MAIL_PASSWORD", "")
+
+# Initialize mail config only if credentials are provided
+mail_conf = None
+if MAIL_USERNAME and MAIL_PASSWORD and "@" in MAIL_USERNAME:
+    try:
+        mail_conf = ConnectionConfig(
+            MAIL_USERNAME=MAIL_USERNAME,
+            MAIL_PASSWORD=SecretStr(MAIL_PASSWORD),
+            MAIL_FROM=MAIL_USERNAME,
+            MAIL_PORT=587,
+            MAIL_SERVER="smtp.gmail.com",
+            MAIL_STARTTLS=True,
+            MAIL_SSL_TLS=False,
+            USE_CREDENTIALS=True,
+        )
+    except Exception as e:
+        print(f"⚠️  Failed to configure email: {e}")
+        mail_conf = None
 
 audit_logger = CryptographicAuditLogger(POSTGRES_DSN)
 
@@ -178,13 +200,95 @@ async def send_whatsapp_approval(thread_id: str, details: dict):
     try:
         from twilio.rest import Client as TwilioClient
         client = TwilioClient(TWILIO_SID, TWILIO_TOKEN)
+        student = details.get("student_name") or "Student"
+        program = details.get("course_program") or "-"
+        year = details.get("academic_year") or "-"
+        roll = details.get("roll_number") or "-"
         client.messages.create(
-            body=f"⚠️ APPROVAL REQUIRED\nThread: {thread_id}\nOp: {details.get('operation','?')}\n\nReply APPROVE or REJECT",
+            body=(
+                f"⚠️ APPROVAL REQUIRED\n"
+                f"Thread: {thread_id}\n"
+                f"Student: {student}\n"
+                f"Program: {program}\n"
+                f"Year: {year}\n"
+                f"Roll/Reg No: {roll}\n"
+                f"Request: {details.get('operation','?')}\n\n"
+                "Reply APPROVE or REJECT"
+            ),
             from_=TWILIO_WA_FROM,
             to=ADMIN_WA_TO,
         )
     except Exception as e:
         print(f"WhatsApp error: {e}")
+
+
+async def send_student_approval_notice(student_name: Optional[str], student_email: Optional[str], student_whatsapp: Optional[str], thread_id: str, request_summary: str, details: dict):
+    approved_action = details.get("operation") or request_summary or "Institutional service request"
+    notice_text = (
+        f"Campus Approval Notice\n\n"
+        f"Student: {student_name or 'Student'}\n"
+        f"Thread: {thread_id}\n"
+        f"Request: {approved_action}\n"
+        f"Status: APPROVED\n\n"
+        "This is an official approval notice issued by the institution. Please keep it for your records."
+    )
+
+    if student_email and mail_conf and MAIL_USERNAME:
+        try:
+            message = MessageSchema(
+                subject=f"[Campus Agent] Approval Notice — {thread_id}",
+                recipients=[student_email],
+                body=f"""
+                <h2>✅ Approval Notice</h2>
+                <p><b>Student:</b> {student_name or 'Student'}</p>
+                <p><b>Thread:</b> {thread_id}</p>
+                <p><b>Request:</b> {approved_action}</p>
+                <p><b>Status:</b> Approved</p>
+                <p>This is an official institutional approval notice. Please keep it for your records.</p>
+                """,
+                subtype=MessageType.html,
+            )
+            fm = FastMail(mail_conf)
+            await fm.send_message(message)
+        except Exception as exc:
+            print(f"Student email notice error: {exc}")
+
+    if student_whatsapp and TWILIO_SID:
+        try:
+            from twilio.rest import Client as TwilioClient
+            client = TwilioClient(TWILIO_SID, TWILIO_TOKEN)
+            client.messages.create(
+                body=notice_text,
+                from_=TWILIO_WA_FROM,
+                to=student_whatsapp,
+            )
+        except Exception as exc:
+            print(f"Student WhatsApp notice error: {exc}")
+
+# ─── EMAIL DISPATCH──
+async def send_email_approval(thread_id: str, details: dict):
+    if not mail_conf or not MAIL_USERNAME or MAIL_USERNAME == "":
+        return
+    try:
+        message = MessageSchema(
+            subject=f"[Campus Agent] Approval Required — {thread_id}",
+            recipients=cast(List, [MAIL_USERNAME]) if MAIL_USERNAME else [],
+            body=f"""
+            <h2>⚠️ Approval Required</h2>
+            <p><b>Thread:</b> {thread_id}</p>
+            <p><b>Student:</b> {details.get('student_name', 'Student')}</p>
+            <p><b>Program:</b> {details.get('course_program', '-')}</p>
+            <p><b>Year:</b> {details.get('academic_year', '-')}</p>
+            <p><b>Roll/Reg No:</b> {details.get('roll_number', '-')}</p>
+            <p><b>Operation:</b> {details.get('operation','?')}</p>
+            <p>Log in to the Campus Agent dashboard to approve or reject.</p>
+            """,
+            subtype=MessageType.html,
+        )
+        fm = FastMail(mail_conf)
+        await fm.send_message(message)
+    except Exception as e:
+        print(f"Email error: {e}")
         
 # ─── TRANSLATION HELPERS (Google Translate free endpoint) ───
 LANG_CODE_MAP = {
@@ -224,10 +328,20 @@ async def _detect_language(text: str) -> str:
 class RequestModel(BaseModel):
     thread_id:  str
     user_query: str
+    student_name: Optional[str] = None
+    student_email: Optional[str] = None
+    student_whatsapp: Optional[str] = None
+    course_program: Optional[str] = None
+    academic_year: Optional[str] = None
+    roll_number: Optional[str] = None
 
 class ApprovalModel(BaseModel):
     thread_id: str
     decision:  Literal["APPROVED", "REJECTED"]
+    student_name: Optional[str] = None
+    student_email: Optional[str] = None
+    student_whatsapp: Optional[str] = None
+    request_summary: Optional[str] = None
 
 class TranslateModel(BaseModel):
     text:      str
@@ -250,7 +364,7 @@ async def health():
 # ── Submit request ──
 @app.post("/api/request")
 async def submit_request(req: RequestModel, bg: BackgroundTasks):
-    config = {"configurable": {"thread_id": req.thread_id}}
+    config = cast(RunnableConfig, {"configurable": {"thread_id": req.thread_id}})
     initial_state: AgentState = {
         "thread_id": req.thread_id, "user_query": req.user_query,
         "action_type": "", "action_details": {}, "approval_status": None,
@@ -261,9 +375,18 @@ async def submit_request(req: RequestModel, bg: BackgroundTasks):
             pass
         snapshot = app_graph.get_state(config)
         if "human_approval_gate" in snapshot.next:
-            details = snapshot.values.get("action_details", {})
+            details = dict(snapshot.values.get("action_details", {}))
+            details.update({
+                "student_name": req.student_name,
+                "student_email": req.student_email,
+                "student_whatsapp": req.student_whatsapp,
+                "course_program": req.course_program,
+                "academic_year": req.academic_year,
+                "roll_number": req.roll_number,
+            })
             bg.add_task(send_telegram_approval, req.thread_id, details)
-            # Log to demo store
+            bg.add_task(send_whatsapp_approval, req.thread_id, details)
+            bg.add_task(send_email_approval,    req.thread_id, details)
             _add_demo_log(req.thread_id, "planner_agent", "ESCALATED", "CONSEQUENTIAL_ACTION", details)
             return {"status": "PAUSED_FOR_APPROVAL", "thread_id": req.thread_id, "operation": details.get("operation")}
         result = snapshot.values.get("result", "")
@@ -293,19 +416,36 @@ def _add_demo_log(thread_id: str, actor: str, decision: str, action_type: str, p
 # ── Approve/Reject ──
 @app.post("/api/approve")
 async def approve_request(req: ApprovalModel):
-    config = {"configurable": {"thread_id": req.thread_id}}
+    config = cast(RunnableConfig, {"configurable": {"thread_id": req.thread_id}})
     try:
         app_graph.update_state(config, {"approval_status": req.decision}, as_node="human_approval_gate")
         for _ in app_graph.stream(None, config=config):
             pass
         final = app_graph.get_state(config)
         result = final.values.get("result", "")
-        details = final.values.get("action_details", {})
-        _add_demo_log(req.thread_id, "human_admin", req.decision, "HUMAN_GATE", {"operation": details.get("operation", ""), "decision": req.decision})
+        details = dict(final.values.get("action_details", {}))
+        details.update({
+            "student_name": req.student_name,
+            "student_email": req.student_email,
+            "student_whatsapp": req.student_whatsapp,
+            "request_summary": req.request_summary,
+        })
+        _add_demo_log(req.thread_id, "human_admin", req.decision, "HUMAN_GATE", {"operation": details.get("operation", ""), "decision": req.decision, "student_name": req.student_name})
         try:
             await audit_logger.log_decision(req.thread_id, "human_admin", req.decision, "HUMAN_GATE", details)
         except Exception:
             pass
+
+        if req.decision == "APPROVED":
+            await send_student_approval_notice(
+                req.student_name,
+                req.student_email,
+                req.student_whatsapp,
+                req.thread_id,
+                req.request_summary or details.get("operation", "Institutional service request"),
+                details,
+            )
+
         return {"status": "ok", "result": result, "decision": req.decision}
     except Exception as e:
         return {"status": "ERROR", "message": str(e)}
@@ -318,7 +458,7 @@ async def telegram_webhook(req: Request):
         cb     = data["callback_query"]
         action, thread_id = cb["data"].split(":", 1)
         decision = "APPROVED" if action == "approve" else "REJECTED"
-        config = {"configurable": {"thread_id": thread_id}}
+        config = cast(RunnableConfig, {"configurable": {"thread_id": thread_id}})
         try:
             app_graph.update_state(config, {"approval_status": decision}, as_node="human_approval_gate")
             for _ in app_graph.stream(None, config=config):
