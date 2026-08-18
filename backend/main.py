@@ -24,10 +24,24 @@ POSTGRES_DSN        = os.getenv("POSTGRES_DSN", "postgresql://postgres:password@
 TELEGRAM_BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_ADMIN_CHAT = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
 TELEGRAM_API_URL    = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+# Telegram is now a notification-only channel — the button links out to the
+# faculty dashboard instead of triggering an inline Approve/Reject callback.
+# Point this at the deployed frontend (not the backend) and, if the frontend
+# has a dedicated faculty route, include it for a more direct link.
+FACULTY_DASHBOARD_URL = os.getenv("FACULTY_DASHBOARD_URL", "https://campus-agent-fc9v.onrender.com/")
 TWILIO_SID          = os.getenv("TWILIO_ACCOUNT_SID", "")
 TWILIO_TOKEN        = os.getenv("TWILIO_AUTH_TOKEN", "")
 TWILIO_WA_FROM      = os.getenv("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238886")
 ADMIN_WA_TO         = os.getenv("ADMIN_WHATSAPP_NUMBER", "whatsapp:+919438353188")
+# Outside the 24-hour WhatsApp conversation window, Twilio requires an
+# approved Content Template (an HX... Content SID) rather than a free-form
+# `body`. These two are separate because the faculty "approval required"
+# alert and the student "approval notice" are different templates with
+# different variables. Set them in Render's environment once the templates
+# are approved in the Twilio Console; until then, sending is skipped with
+# a log line rather than failing the request.
+TWILIO_WHATSAPP_CONTENT_SID          = os.getenv("TWILIO_WHATSAPP_CONTENT_SID", "")
+TWILIO_WHATSAPP_APPROVAL_CONTENT_SID = os.getenv("TWILIO_WHATSAPP_APPROVAL_CONTENT_SID", "")
 MAIL_USERNAME       = os.getenv("MAIL_USERNAME", "")
 MAIL_PASSWORD       = os.getenv("MAIL_PASSWORD", "")
 
@@ -140,17 +154,43 @@ app.add_middleware(
 _requests_store: Dict[str, Dict[str, Any]] = {}
 
 # ─── TELEGRAM DISPATCH ───
+# Notification-only: this no longer drives approval. The message carries the
+# full student/request context and a link out to the Faculty Dashboard,
+# where the actual Approve/Reject decision is made via POST /api/approve.
 async def send_telegram_approval(thread_id: str, details: dict):
     if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN in ("", "YOUR_TELEGRAM_TOKEN"):
         return
+
+    student  = details.get("student_name") or "Not provided"
+    email    = details.get("student_email") or "Not provided"
+    program  = details.get("course_program") or "Not provided"
+    year     = details.get("academic_year") or "Not provided"
+    roll     = details.get("roll_number") or "Not provided"
+    operation = details.get("operation") or "?"
+    request_text = details.get("query") or operation
+
+    text = (
+        "⚠️ *APPROVAL REQUIRED*\n\n"
+        f"👤 *Student:* {student}\n"
+        f"📧 *Email:* {email}\n"
+        f"🎓 *Program:* {program}\n"
+        f"📚 *Academic Year:* {year}\n"
+        f"🆔 *Roll/Reg No:* {roll}\n\n"
+        f"📋 *Request:*\n{request_text}\n\n"
+        f"🔹 *Operation:* {operation}\n"
+        f"🔹 *Thread ID:* `{thread_id}`\n\n"
+        "Please review this request in the Faculty Dashboard."
+    )
+
     payload = {
         "chat_id": TELEGRAM_ADMIN_CHAT,
-        "text": f"⚠️ *APPROVAL REQUIRED*\nThread: `{thread_id}`\nOp: {details.get('operation','?')}",
+        "text": text,
         "parse_mode": "Markdown",
-        "reply_markup": {"inline_keyboard": [[
-            {"text": "✅ Approve", "callback_data": f"approve:{thread_id}"},
-            {"text": "❌ Reject",  "callback_data": f"reject:{thread_id}"},
-        ]]}
+        "reply_markup": {
+            "inline_keyboard": [[
+                {"text": "👉 Open Faculty Dashboard", "url": FACULTY_DASHBOARD_URL}
+            ]]
+        },
     }
     try:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -162,26 +202,31 @@ async def send_telegram_approval(thread_id: str, details: dict):
 async def send_whatsapp_approval(thread_id: str, details: dict):
     if not TWILIO_SID or TWILIO_SID == "":
         return
+    if not TWILIO_WHATSAPP_CONTENT_SID:
+        # No approved Content Template configured — sending a free-form
+        # `body` here fails with Twilio error 63016 ("ContentSid required")
+        # for business-initiated WhatsApp messages outside the 24h session
+        # window. Skip rather than crash the request flow; Telegram/email
+        # still carry the alert.
+        print("WhatsApp approval alert skipped: TWILIO_WHATSAPP_CONTENT_SID is not configured")
+        return
     try:
         from twilio.rest import Client as TwilioClient
         client = TwilioClient(TWILIO_SID, TWILIO_TOKEN)
         student = details.get("student_name") or "Student"
-        program = details.get("course_program") or "-"
-        year = details.get("academic_year") or "-"
-        roll = details.get("roll_number") or "-"
+        operation = details.get("operation") or "?"
+        # Variable numbering ({{1}}, {{2}}, {{3}}, ...) must match whatever
+        # placeholders the approved template was built with in the Twilio
+        # Console — adjust the keys/values here if your template differs.
         client.messages.create(
-            body=(
-                f"⚠️ APPROVAL REQUIRED\n"
-                f"Thread: {thread_id}\n"
-                f"Student: {student}\n"
-                f"Program: {program}\n"
-                f"Year: {year}\n"
-                f"Roll/Reg No: {roll}\n"
-                f"Request: {details.get('operation','?')}\n\n"
-                "Reply APPROVE or REJECT"
-            ),
             from_=TWILIO_WA_FROM,
             to=ADMIN_WA_TO,
+            content_sid=TWILIO_WHATSAPP_CONTENT_SID,
+            content_variables=json.dumps({
+                "1": student,
+                "2": thread_id,
+                "3": operation,
+            }),
         )
     except Exception as e:
         print(f"WhatsApp error: {e}")
@@ -189,14 +234,6 @@ async def send_whatsapp_approval(thread_id: str, details: dict):
 
 async def send_student_approval_notice(student_name: Optional[str], student_email: Optional[str], student_whatsapp: Optional[str], thread_id: str, request_summary: str, details: dict):
     approved_action = details.get("operation") or request_summary or "Institutional service request"
-    notice_text = (
-        f"Campus Approval Notice\n\n"
-        f"Student: {student_name or 'Student'}\n"
-        f"Thread: {thread_id}\n"
-        f"Request: {approved_action}\n"
-        f"Status: APPROVED\n\n"
-        "This is an official approval notice issued by the institution. Please keep it for your records."
-    )
 
     if student_email and mail_conf and MAIL_USERNAME:
         try:
@@ -219,16 +256,29 @@ async def send_student_approval_notice(student_name: Optional[str], student_emai
             print(f"Student email notice error: {exc}")
 
     if student_whatsapp and TWILIO_SID:
-        try:
-            from twilio.rest import Client as TwilioClient
-            client = TwilioClient(TWILIO_SID, TWILIO_TOKEN)
-            client.messages.create(
-                body=notice_text,
-                from_=TWILIO_WA_FROM,
-                to=student_whatsapp,
-            )
-        except Exception as exc:
-            print(f"Student WhatsApp notice error: {exc}")
+        if not TWILIO_WHATSAPP_APPROVAL_CONTENT_SID:
+            # Same 63016 issue as the faculty alert above, plus: on a Twilio
+            # trial account, free-form messages to arbitrary numbers are
+            # blocked regardless (only verified numbers / the sandbox work).
+            # A template still needs the recipient to have opted into the
+            # sandbox or a production sender to actually be delivered.
+            print("Student WhatsApp notice skipped: TWILIO_WHATSAPP_APPROVAL_CONTENT_SID is not configured")
+        else:
+            try:
+                from twilio.rest import Client as TwilioClient
+                client = TwilioClient(TWILIO_SID, TWILIO_TOKEN)
+                client.messages.create(
+                    from_=TWILIO_WA_FROM,
+                    to=student_whatsapp,
+                    content_sid=TWILIO_WHATSAPP_APPROVAL_CONTENT_SID,
+                    content_variables=json.dumps({
+                        "1": student_name or "Student",
+                        "2": thread_id,
+                        "3": approved_action,
+                    }),
+                )
+            except Exception as exc:
+                print(f"Student WhatsApp notice error: {exc}")
 
 # ─── EMAIL DISPATCH──
 async def send_email_approval(thread_id: str, details: dict):
