@@ -2,11 +2,15 @@ import os
 import json
 import uuid
 import httpx
+import base64
+import hashlib
+import hmac
+import html
 from datetime import datetime
 from typing import TypedDict, Literal, Optional, Dict, Any, List, cast
 from fastapi import FastAPI, Request, BackgroundTasks, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel, SecretStr
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
@@ -44,6 +48,26 @@ TWILIO_WHATSAPP_CONTENT_SID          = os.getenv("TWILIO_WHATSAPP_CONTENT_SID", 
 TWILIO_WHATSAPP_APPROVAL_CONTENT_SID = os.getenv("TWILIO_WHATSAPP_APPROVAL_CONTENT_SID", "")
 MAIL_USERNAME       = os.getenv("MAIL_USERNAME", "")
 MAIL_PASSWORD       = os.getenv("MAIL_PASSWORD", "")
+# Previously hardcoded to Gmail and always sent to (and from) MAIL_USERNAME
+# itself — i.e. the faculty inbox was whatever account the backend used to
+# send mail, and the message just said "log into the dashboard" with no
+# real action attached. These make the mail server and the actual faculty
+# recipient configurable, independent of the sending account.
+MAIL_FROM              = os.getenv("MAIL_FROM", MAIL_USERNAME)
+MAIL_SERVER            = os.getenv("MAIL_SERVER", "smtp.gmail.com")
+MAIL_PORT              = int(os.getenv("MAIL_PORT", "587"))
+MAIL_STARTTLS          = os.getenv("MAIL_STARTTLS", "true").lower() == "true"
+MAIL_SSL_TLS           = os.getenv("MAIL_SSL_TLS", "false").lower() == "true"
+FACULTY_APPROVAL_EMAIL = os.getenv("FACULTY_APPROVAL_EMAIL", MAIL_USERNAME)
+# Public base URL of this backend (not the frontend) — used to build the
+# one-click email Approve/Reject links below. Must be reachable from
+# wherever faculty read their email.
+PUBLIC_API_URL         = os.getenv("PUBLIC_API_URL", "http://localhost:8000").rstrip("/")
+# Secret used to HMAC-sign the email action links so a link can't be
+# forged or replayed for a different thread/decision. Required for the
+# email Approve/Reject buttons to appear — without it the email falls back
+# to a "use the dashboard" message.
+APPROVAL_ACTION_SECRET = os.getenv("APPROVAL_ACTION_SECRET") or os.getenv("SESSION_SECRET", "")
 
 # Initialize mail config only if credentials are provided
 mail_conf = None
@@ -52,11 +76,11 @@ if MAIL_USERNAME and MAIL_PASSWORD and "@" in MAIL_USERNAME:
         mail_conf = ConnectionConfig(
             MAIL_USERNAME=MAIL_USERNAME,
             MAIL_PASSWORD=SecretStr(MAIL_PASSWORD),
-            MAIL_FROM=MAIL_USERNAME,
-            MAIL_PORT=587,
-            MAIL_SERVER="smtp.gmail.com",
-            MAIL_STARTTLS=True,
-            MAIL_SSL_TLS=False,
+            MAIL_FROM=MAIL_FROM or MAIL_USERNAME,
+            MAIL_PORT=MAIL_PORT,
+            MAIL_SERVER=MAIL_SERVER,
+            MAIL_STARTTLS=MAIL_STARTTLS,
+            MAIL_SSL_TLS=MAIL_SSL_TLS,
             USE_CREDENTIALS=True,
         )
     except Exception as e:
@@ -153,6 +177,100 @@ app.add_middleware(
 # read from this single shared store instead of separate local React state.
 _requests_store: Dict[str, Dict[str, Any]] = {}
 
+# ─── EMAIL HELPERS ───
+def _display(value: Any, fallback: str = "-") -> str:
+    value = value if value not in (None, "") else fallback
+    return html.escape(str(value))
+
+
+def _recipients(value: str) -> List[str]:
+    """Comma-separated recipient list, e.g. FACULTY_APPROVAL_EMAIL set to
+    'dean@college.edu, hod@college.edu'."""
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _approval_token(thread_id: str, decision: Literal["APPROVED", "REJECTED"]) -> str:
+    """Tamper-proof, stateless token identifying (thread_id, decision) for
+    the one-click email action links — HMAC-signed so a link can't be
+    edited to target a different request or flip the decision."""
+    payload = f"{thread_id}|{decision}"
+    encoded = base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
+    signature = hmac.new(
+        APPROVAL_ACTION_SECRET.encode("utf-8"),
+        encoded.encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{encoded}.{signature}"
+
+
+def _read_approval_token(token: str) -> Optional[tuple[str, Literal["APPROVED", "REJECTED"]]]:
+    if not APPROVAL_ACTION_SECRET or "." not in token:
+        return None
+    encoded, signature = token.rsplit(".", 1)
+    expected = hmac.new(
+        APPROVAL_ACTION_SECRET.encode("utf-8"),
+        encoded.encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        return None
+    try:
+        padded = encoded + "=" * (-len(encoded) % 4)
+        thread_id, decision = base64.urlsafe_b64decode(padded).decode("utf-8").split("|", 1)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not thread_id or decision not in ("APPROVED", "REJECTED"):
+        return None
+    return thread_id, cast(Literal["APPROVED", "REJECTED"], decision)
+
+
+def _approval_url(thread_id: str, decision: Literal["APPROVED", "REJECTED"]) -> Optional[str]:
+    if not APPROVAL_ACTION_SECRET:
+        return None
+    return f"{PUBLIC_API_URL}/api/email/approval/{_approval_token(thread_id, decision)}"
+
+
+def _details_html(details: dict, thread_id: str) -> str:
+    rows = [
+        ("Student name", details.get("student_name")),
+        ("Roll / registration no.", details.get("roll_number")),
+        ("Course / program", details.get("course_program")),
+        ("Academic year", details.get("academic_year")),
+        ("Student email", details.get("student_email")),
+        ("Student WhatsApp", details.get("student_whatsapp")),
+        ("Request type", details.get("operation")),
+        ("Request", details.get("query") or details.get("request_summary")),
+        ("Thread ID", thread_id),
+    ]
+    rendered = "".join(
+        f"<tr><td style='padding:7px 12px;border-bottom:1px solid #e5e7eb;color:#475569'><b>{html.escape(label)}</b></td>"
+        f"<td style='padding:7px 12px;border-bottom:1px solid #e5e7eb'>{_display(value)}</td></tr>"
+        for label, value in rows
+    )
+    return (
+        "<table style='width:100%;border-collapse:collapse;background:#f8fafc;"
+        "border:1px solid #e2e8f0;border-radius:8px'>"
+        f"{rendered}</table>"
+    )
+
+
+async def _send_email(subject: str, recipients: List[str], body: str) -> bool:
+    if not mail_conf or not recipients:
+        return False
+    try:
+        message = MessageSchema(
+            subject=subject,
+            recipients=cast(List, recipients),
+            body=body,
+            subtype=MessageType.html,
+        )
+        await FastMail(mail_conf).send_message(message)
+        return True
+    except Exception as exc:
+        print(f"Email notification error: {exc}")
+        return False
+
+
 # ─── TELEGRAM DISPATCH ───
 # Notification-only: this no longer drives approval. The message carries the
 # full student/request context and a link out to the Faculty Dashboard,
@@ -232,30 +350,35 @@ async def send_whatsapp_approval(thread_id: str, details: dict):
         print(f"WhatsApp error: {e}")
 
 
-async def send_student_approval_notice(student_name: Optional[str], student_email: Optional[str], student_whatsapp: Optional[str], thread_id: str, request_summary: str, details: dict):
+async def send_student_approval_notice(
+    student_name: Optional[str],
+    student_email: Optional[str],
+    student_whatsapp: Optional[str],
+    thread_id: str,
+    request_summary: str,
+    details: dict,
+    decision: Literal["APPROVED", "REJECTED"] = "APPROVED",
+):
     approved_action = details.get("operation") or request_summary or "Institutional service request"
+    status_label = "APPROVED" if decision == "APPROVED" else "REJECTED"
 
-    if student_email and mail_conf and MAIL_USERNAME:
+    if student_email and mail_conf:
         try:
-            message = MessageSchema(
-                subject=f"[Campus Agent] Approval Notice — {thread_id}",
-                recipients=[student_email],
-                body=f"""
-                <h2>✅ Approval Notice</h2>
-                <p><b>Student:</b> {student_name or 'Student'}</p>
-                <p><b>Thread:</b> {thread_id}</p>
-                <p><b>Request:</b> {approved_action}</p>
-                <p><b>Status:</b> Approved</p>
-                <p>This is an official institutional approval notice. Please keep it for your records.</p>
+            await _send_email(
+                f"[Campus Agent] Request {status_label} — {thread_id}",
+                [student_email],
+                f"""
+                <div style="font-family:Arial,sans-serif;max-width:720px;margin:auto">
+                  <h2>Campus Agent — Request {status_label}</h2>
+                  {_details_html(details, thread_id)}
+                  <p style="margin-top:18px">This is an official institutional notice. Please keep it for your records.</p>
+                </div>
                 """,
-                subtype=MessageType.html,
             )
-            fm = FastMail(mail_conf)
-            await fm.send_message(message)
         except Exception as exc:
             print(f"Student email notice error: {exc}")
 
-    if student_whatsapp and TWILIO_SID:
+    if decision == "APPROVED" and student_whatsapp and TWILIO_SID:
         if not TWILIO_WHATSAPP_APPROVAL_CONTENT_SID:
             # Same 63016 issue as the faculty alert above, plus: on a Twilio
             # trial account, free-form messages to arbitrary numbers are
@@ -280,30 +403,43 @@ async def send_student_approval_notice(student_name: Optional[str], student_emai
             except Exception as exc:
                 print(f"Student WhatsApp notice error: {exc}")
 
-# ─── EMAIL DISPATCH──
+# ─── EMAIL DISPATCH ───
 async def send_email_approval(thread_id: str, details: dict):
-    if not mail_conf or not MAIL_USERNAME or MAIL_USERNAME == "":
+    """Faculty 'approval required' email. Two things changed from before:
+    (1) it goes to FACULTY_APPROVAL_EMAIL — a real, configurable recipient —
+    instead of just mailing MAIL_USERNAME (the sending account) back to
+    itself; (2) when APPROVAL_ACTION_SECRET is configured, it includes
+    signed Approve/Reject links that hit /api/email/approval/{token} and
+    apply the decision directly, instead of only saying 'log into the
+    dashboard' with no real action attached."""
+    recipients = _recipients(FACULTY_APPROVAL_EMAIL or MAIL_USERNAME or "")
+    if not recipients or not mail_conf:
         return
-    try:
-        message = MessageSchema(
-            subject=f"[Campus Agent] Approval Required — {thread_id}",
-            recipients=cast(List, [MAIL_USERNAME]) if MAIL_USERNAME else [],
-            body=f"""
-            <h2>⚠️ Approval Required</h2>
-            <p><b>Thread:</b> {thread_id}</p>
-            <p><b>Student:</b> {details.get('student_name', 'Student')}</p>
-            <p><b>Program:</b> {details.get('course_program', '-')}</p>
-            <p><b>Year:</b> {details.get('academic_year', '-')}</p>
-            <p><b>Roll/Reg No:</b> {details.get('roll_number', '-')}</p>
-            <p><b>Operation:</b> {details.get('operation','?')}</p>
-            <p>Log in to the Campus Agent dashboard to approve or reject.</p>
-            """,
-            subtype=MessageType.html,
-        )
-        fm = FastMail(mail_conf)
-        await fm.send_message(message)
-    except Exception as e:
-        print(f"Email error: {e}")
+
+    approve_url = _approval_url(thread_id, "APPROVED")
+    reject_url = _approval_url(thread_id, "REJECTED")
+    action_buttons = (
+        f"<p style='margin:18px 0'>"
+        f"<a href='{html.escape(approve_url or '#')}' style='background:#15803d;color:white;padding:11px 16px;border-radius:6px;text-decoration:none;margin-right:8px'>Approve</a>"
+        f"<a href='{html.escape(reject_url or '#')}' style='background:#b91c1c;color:white;padding:11px 16px;border-radius:6px;text-decoration:none'>Reject</a>"
+        f"</p>"
+        if approve_url and reject_url
+        else "<p>Set APPROVAL_ACTION_SECRET to enable secure one-click email actions. Use the faculty dashboard meanwhile.</p>"
+    )
+
+    await _send_email(
+        f"[Campus Agent] Approval Required — {thread_id}",
+        recipients,
+        f"""
+        <div style="font-family:Arial,sans-serif;max-width:720px;margin:auto">
+          <h2>Campus Agent — Approval Required</h2>
+          <p>A student request is waiting for faculty review.</p>
+          {_details_html(details, thread_id)}
+          {action_buttons}
+          <p style="color:#475569;font-size:12px">This link is signed for this specific request. A decision made here or on the faculty dashboard is reflected on both.</p>
+        </div>
+        """,
+    )
 
 # ─── TRANSLATION HELPERS (Google Translate free endpoint) ───
 LANG_CODE_MAP = {
@@ -460,65 +596,128 @@ async def get_requests(student_email: Optional[str] = Query(default=None)):
     items.sort(key=lambda r: r.get("created_at", ""), reverse=True)
     return {"requests": items}
 
+async def _apply_decision(
+    thread_id: str,
+    decision: Literal["APPROVED", "REJECTED"],
+    request_details: Optional[dict] = None,
+) -> dict:
+    """Shared by POST /api/approve and the signed email action links: runs
+    the LangGraph resume, syncs the shared request store, logs the audit
+    event, and notifies the student. Idempotent — clicking an email link
+    twice (or clicking it after the dashboard already decided) reports the
+    existing decision instead of re-running the graph."""
+    stored = _requests_store.get(thread_id)
+    if stored and stored.get("status") in ("APPROVED", "REJECTED"):
+        return {"status": "already_decided", "decision": stored["status"], "result": stored.get("result")}
+
+    config = cast(RunnableConfig, {"configurable": {"thread_id": thread_id}})
+    app_graph.update_state(config, {"approval_status": decision}, as_node="human_approval_gate")
+    for _ in app_graph.stream(None, config=config):
+        pass
+    final = app_graph.get_state(config)
+    result = final.values.get("result", "")
+    details = dict(final.values.get("action_details", {}))
+    if stored:
+        details.update({k: v for k, v in stored.items() if v not in (None, "")})
+    if request_details:
+        details.update({k: v for k, v in request_details.items() if v not in (None, "")})
+
+    try:
+        await audit_logger.log_decision(thread_id, "human_admin", decision, "HUMAN_GATE", details)
+    except Exception:
+        pass
+
+    new_status = "APPROVED" if decision == "APPROVED" else "REJECTED"
+    if stored:
+        stored["status"] = new_status
+        stored["result"] = result
+    else:
+        # Defensive fallback: decided for a thread we never saw in
+        # /api/request (e.g. server restarted). Still record it so the
+        # dashboards have something to show.
+        stored = {
+            "id": thread_id,
+            "thread_id": thread_id,
+            "student_name": details.get("student_name"),
+            "student_email": details.get("student_email"),
+            "student_whatsapp": details.get("student_whatsapp"),
+            "query": details.get("request_summary") or details.get("operation", ""),
+            "status": new_status,
+            "operation": details.get("operation", ""),
+            "result": result,
+            "created_at": datetime.utcnow().isoformat() + "Z",
+        }
+        _requests_store[thread_id] = stored
+
+    # Previously this only ran for APPROVED decisions, so a rejected
+    # student never received any notice at all. Email now always fires;
+    # WhatsApp stays approved-only inside send_student_approval_notice
+    # (unchanged), since the approved WhatsApp template's wording doesn't
+    # apply to a rejection.
+    await send_student_approval_notice(
+        stored.get("student_name"),
+        stored.get("student_email"),
+        stored.get("student_whatsapp"),
+        thread_id,
+        stored.get("query") or stored.get("operation", "Institutional service request"),
+        details,
+        decision,
+    )
+
+    return {"status": "ok", "result": result, "decision": decision}
+
+
 # ── Approve/Reject ──
 @app.post("/api/approve")
 async def approve_request(req: ApprovalModel):
-    config = cast(RunnableConfig, {"configurable": {"thread_id": req.thread_id}})
     try:
-        app_graph.update_state(config, {"approval_status": req.decision}, as_node="human_approval_gate")
-        for _ in app_graph.stream(None, config=config):
-            pass
-        final = app_graph.get_state(config)
-        result = final.values.get("result", "")
-        details = dict(final.values.get("action_details", {}))
-        details.update({
-            "student_name": req.student_name,
-            "student_email": req.student_email,
-            "student_whatsapp": req.student_whatsapp,
-            "request_summary": req.request_summary,
-        })
-        try:
-            await audit_logger.log_decision(req.thread_id, "human_admin", req.decision, "HUMAN_GATE", details)
-        except Exception:
-            pass
-
-        # Keep the shared request store in sync so every open dashboard
-        # (student or faculty) reflects this decision on its next poll.
-        new_status = "APPROVED" if req.decision == "APPROVED" else "REJECTED"
-        stored = _requests_store.get(req.thread_id)
-        if stored:
-            stored["status"] = new_status
-            stored["result"] = result
-        else:
-            # Defensive fallback: approve was called for a thread we never
-            # saw in /api/request (e.g. server restarted). Still record it
-            # so the dashboards have something to show.
-            _requests_store[req.thread_id] = {
-                "id": req.thread_id,
-                "thread_id": req.thread_id,
+        return await _apply_decision(
+            req.thread_id,
+            req.decision,
+            {
                 "student_name": req.student_name,
                 "student_email": req.student_email,
                 "student_whatsapp": req.student_whatsapp,
-                "query": req.request_summary or details.get("operation", ""),
-                "status": new_status,
-                "operation": details.get("operation", ""),
-                "result": result,
-                "created_at": datetime.utcnow().isoformat() + "Z",
-            }
-
-        if req.decision == "APPROVED":
-            await send_student_approval_notice(
-                req.student_name,
-                req.student_email,
-                req.student_whatsapp,
-                req.thread_id,
-                req.request_summary or details.get("operation", "Institutional service request"),
-                details,
-            )
-
-        return {"status": "ok", "result": result, "decision": req.decision}
+                "request_summary": req.request_summary,
+            },
+        )
     except Exception as e:
         return {"status": "ERROR", "message": str(e)}
+
+
+# ── Email one-click approval (the actual fix: emails now DO something) ──
+@app.get("/api/email/approval/{token}", response_class=HTMLResponse)
+async def email_approval_action(token: str):
+    """Handles the signed Approve/Reject links included in the faculty
+    approval email. Applies the same decision path as /api/approve."""
+    parsed = _read_approval_token(token)
+    if not parsed:
+        return HTMLResponse(
+            "<h2>Invalid or expired approval link</h2><p>Please use the Faculty Dashboard instead.</p>",
+            status_code=400,
+        )
+    thread_id, decision = parsed
+    try:
+        result = await _apply_decision(thread_id, decision)
+        if result.get("status") == "already_decided":
+            message = f"This request was already {str(result.get('decision', 'decided')).lower()}."
+        else:
+            message = f"The request has been {decision.lower()} successfully. The student has been notified."
+        return HTMLResponse(
+            f"""
+            <html><body style="font-family:Arial,sans-serif;max-width:640px;margin:60px auto;padding:24px;color:#0f172a">
+              <h2>Campus Agent</h2>
+              <p>{html.escape(message)}</p>
+              <p><b>Thread:</b> {html.escape(thread_id)}</p>
+              <p>You can close this page.</p>
+            </body></html>
+            """
+        )
+    except Exception as exc:
+        return HTMLResponse(
+            f"<h2>Approval could not be completed</h2><p>{html.escape(str(exc))}</p>",
+            status_code=500,
+        )
 
 # ── Telegram webhook ──
 @app.post("/telegram/webhook")
