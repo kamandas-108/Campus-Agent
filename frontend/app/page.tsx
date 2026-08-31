@@ -231,6 +231,14 @@ interface User {
   rollNumber?: string;
 }
 
+interface DocumentItem {
+  id: string;
+  filename: string;
+  uploadedBy: "student" | "faculty";
+  downloadUrl: string;
+  createdAt: Date;
+}
+
 interface Request {
   id: string;
   userId: string;
@@ -245,6 +253,7 @@ interface Request {
   studentProgram?: string;
   studentYear?: string;
   studentRollNo?: string;
+  documents: DocumentItem[];
 }
 
 type ToastType = "success" | "error" | "warn" | "info";
@@ -561,6 +570,68 @@ function Toast({ t, onClose }: { t: ToastItem; onClose: () => void }) {
 
 const USER_STORAGE_KEY = "campus_agent_user";
 
+function DocumentPanel({
+  documents,
+  threadId,
+  viewerRole,
+  pendingFile,
+  onFileChange,
+  onUpload,
+  uploading,
+}: {
+  documents: DocumentItem[];
+  threadId: string;
+  viewerRole: "student" | "faculty";
+  pendingFile: File | null | undefined;
+  onFileChange: (file: File | null) => void;
+  onUpload: () => void;
+  uploading: boolean;
+}) {
+  const labelFor = (doc: DocumentItem) => {
+    if (doc.uploadedBy === viewerRole) return "Uploaded by You";
+    return doc.uploadedBy === "student" ? "Uploaded by Student" : "Uploaded by Faculty";
+  };
+
+  return (
+    <div className="mt-3 rounded-xl border border-slate-700 bg-slate-900/50 p-3">
+      <p className="mb-2 text-xs uppercase tracking-[0.15em] text-slate-400">Documents</p>
+      {documents.length === 0 ? (
+        <p className="mb-2 text-xs text-slate-500">No documents yet.</p>
+      ) : (
+        <div className="mb-3 space-y-1.5">
+          {documents.map((doc) => (
+            <div key={doc.id} className="flex items-center justify-between gap-3 rounded-lg border border-slate-700 bg-slate-800/60 px-3 py-1.5 text-xs">
+              <span className="truncate text-slate-200">📄 {doc.filename} <span className="text-slate-500">— {labelFor(doc)}</span></span>
+              <a href={doc.downloadUrl} target="_blank" rel="noreferrer" className="shrink-0 text-cyan-300 hover:underline">Download</a>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          type="file"
+          onChange={(e) => onFileChange(e.target.files?.[0] || null)}
+          className="max-w-[220px] text-xs text-slate-300 file:mr-2 file:rounded-md file:border-0 file:bg-slate-700 file:px-2 file:py-1 file:text-xs file:text-slate-200"
+        />
+        <Btn variant="default" size="sm" onClick={onUpload} loading={uploading} disabled={!pendingFile}>
+          {viewerRole === "student" ? "Upload Document" : "Upload for Student"}
+        </Btn>
+      </div>
+    </div>
+  );
+}
+
+
+function mapBackendDocument(d: any): DocumentItem {
+  return {
+    id: d.id,
+    filename: d.filename || "document",
+    uploadedBy: d.uploaded_by === "faculty" ? "faculty" : "student",
+    downloadUrl: d.download_url || "",
+    createdAt: d.created_at ? new Date(d.created_at) : new Date(),
+  };
+}
+
 function mapBackendRequest(r: any): Request {
   return {
     id: r.id || r.thread_id,
@@ -576,6 +647,7 @@ function mapBackendRequest(r: any): Request {
     studentProgram: r.course_program,
     studentYear: r.academic_year,
     studentRollNo: r.roll_number,
+    documents: Array.isArray(r.documents) ? r.documents.map(mapBackendDocument) : [],
   };
 }
 
@@ -595,6 +667,8 @@ export default function CampusAgentApp() {
     { id: "demo-1", title: "Approval alert", message: "Faculty review has been queued for your latest request.", channel: "system", time: "Just now" },
   ]);
   const [followUpText, setFollowUpText] = useState("");
+  const [pendingFiles, setPendingFiles] = useState<Record<string, File | null>>({});
+  const [uploadingThread, setUploadingThread] = useState<string | null>(null);
   const [isListening, setIsListening] = useState(false);
   const recognitionRef = useRef<any>(null);
 
@@ -860,6 +934,44 @@ export default function CampusAgentApp() {
     }
   }, [addNotification, addToast, fetchRequests, requests, t, user]);
 
+  const handleDocumentUpload = useCallback(async (threadId: string, uploadedBy: "student" | "faculty") => {
+    const file = pendingFiles[threadId];
+    if (!file) {
+      addToast("Choose a file first", "warn");
+      return;
+    }
+
+    setUploadingThread(threadId);
+    try {
+      const formData = new FormData();
+      formData.append("thread_id", threadId);
+      formData.append("uploaded_by", uploadedBy);
+      formData.append("file", file);
+
+      const res = await fetch(`${API}/api/document/upload`, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (res.ok) {
+        setPendingFiles((p) => ({ ...p, [threadId]: null }));
+        await fetchRequests(user);
+        addNotification(
+          "Document uploaded",
+          `${file.name} was attached to ${threadId}.`,
+          "system"
+        );
+        addToast("Document uploaded", "success");
+      } else {
+        const errBody = await res.json().catch(() => null);
+        addToast(errBody?.detail || "Document upload failed", "error");
+      }
+    } catch {
+      addToast("Document upload error", "error");
+    }
+    setUploadingThread(null);
+  }, [addNotification, addToast, fetchRequests, pendingFiles, user]);
+
   const handleLogout = useCallback(() => {
     setUser(null);
     setView("login");
@@ -1088,6 +1200,15 @@ export default function CampusAgentApp() {
                             </button>
                           )}
                         </div>
+                        <DocumentPanel
+                          documents={req.documents}
+                          threadId={req.threadId}
+                          viewerRole="student"
+                          pendingFile={pendingFiles[req.threadId]}
+                          onFileChange={(file) => setPendingFiles((p) => ({ ...p, [req.threadId]: file }))}
+                          onUpload={() => handleDocumentUpload(req.threadId, "student")}
+                          uploading={uploadingThread === req.threadId}
+                        />
                       </div>
                     ))
                   )}
@@ -1266,6 +1387,15 @@ export default function CampusAgentApp() {
                       <Btn variant="success" size="sm" onClick={() => handleApproval(req.id, "APPROVED")}>✅ {t.approve}</Btn>
                       <Btn variant="danger" size="sm" onClick={() => handleApproval(req.id, "REJECTED")}>❌ {t.reject}</Btn>
                     </div>
+                    <DocumentPanel
+                      documents={req.documents}
+                      threadId={req.threadId}
+                      viewerRole="faculty"
+                      pendingFile={pendingFiles[req.threadId]}
+                      onFileChange={(file) => setPendingFiles((p) => ({ ...p, [req.threadId]: file }))}
+                      onUpload={() => handleDocumentUpload(req.threadId, "faculty")}
+                      uploading={uploadingThread === req.threadId}
+                    />
                   </div>
                 ))}
               </div>
