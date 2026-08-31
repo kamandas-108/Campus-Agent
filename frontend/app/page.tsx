@@ -578,6 +578,7 @@ function DocumentPanel({
   onFileChange,
   onUpload,
   uploading,
+  deferUpload = false,
 }: {
   documents: DocumentItem[];
   threadId: string;
@@ -586,11 +587,35 @@ function DocumentPanel({
   onFileChange: (file: File | null) => void;
   onUpload: () => void;
   uploading: boolean;
+  deferUpload?: boolean;
 }) {
   const labelFor = (doc: DocumentItem) => {
     if (doc.uploadedBy === viewerRole) return "Uploaded by You";
     return doc.uploadedBy === "student" ? "Uploaded by Student" : "Uploaded by Faculty";
   };
+
+  // deferUpload: there's no thread_id yet (a brand-new request being
+  // composed), so there's nothing to upload to yet. Just let the student
+  // pick a file — handleSubmitRequest uploads it right after the request
+  // is created and gets a real thread_id.
+  if (deferUpload) {
+    return (
+      <div className="mt-3 rounded-xl border border-slate-700 bg-slate-900/50 p-3">
+        <p className="mb-2 text-xs uppercase tracking-[0.15em] text-slate-400">📎 Supporting Document</p>
+        <input
+          type="file"
+          onChange={(e) => onFileChange(e.target.files?.[0] || null)}
+          className="max-w-[240px] text-xs text-slate-300 file:mr-2 file:rounded-md file:border-0 file:bg-slate-700 file:px-2 file:py-1 file:text-xs file:text-slate-200"
+        />
+        {pendingFile ? (
+          <p className="mt-2 text-xs text-emerald-300">Selected: {pendingFile.name}</p>
+        ) : (
+          <p className="mt-2 text-xs text-slate-500">Optional — attach a supporting document with this request.</p>
+        )}
+        <p className="mt-1 text-[11px] text-slate-500">The document will be uploaded when you submit the request.</p>
+      </div>
+    );
+  }
 
   return (
     <div className="mt-3 rounded-xl border border-slate-700 bg-slate-900/50 p-3">
@@ -669,6 +694,7 @@ export default function CampusAgentApp() {
   const [followUpText, setFollowUpText] = useState("");
   const [pendingFiles, setPendingFiles] = useState<Record<string, File | null>>({});
   const [uploadingThread, setUploadingThread] = useState<string | null>(null);
+  const [initialFile, setInitialFile] = useState<File | null>(null);
   const [isListening, setIsListening] = useState(false);
   const recognitionRef = useRef<any>(null);
 
@@ -862,12 +888,37 @@ export default function CampusAgentApp() {
       });
 
       if (res.ok) {
+        // Now that the request has a real thread_id, upload whatever
+        // document the student attached before submitting. Don't set
+        // Content-Type manually — the browser sets the correct multipart
+        // boundary for FormData automatically.
+        if (initialFile) {
+          const formData = new FormData();
+          formData.append("thread_id", threadId);
+          formData.append("uploaded_by", "student");
+          formData.append("file", initialFile);
+
+          try {
+            const uploadRes = await fetch(`${API}/api/document/upload`, {
+              method: "POST",
+              body: formData,
+            });
+            if (!uploadRes.ok) {
+              addToast("Request submitted, but document upload failed", "warn");
+            }
+          } catch {
+            addToast("Request submitted, but document upload failed", "warn");
+          }
+        }
+
         // The backend is now the source of truth — pull the fresh list
-        // instead of guessing the shape of the new record locally.
+        // instead of guessing the shape of the new record locally. This
+        // also picks up the document just uploaded above.
         await fetchRequests(user);
         addNotification("Request submitted", `Faculty alert for ${threadId} has been queued.`, "system");
         addToast(t.submitted, "success");
         setQuery("");
+        setInitialFile(null);
       } else {
         addToast("Request could not be submitted", "error");
       }
@@ -876,7 +927,7 @@ export default function CampusAgentApp() {
     }
 
     setSubmitting(false);
-  }, [addNotification, addToast, fetchRequests, lang, query, t, user]);
+  }, [addNotification, addToast, fetchRequests, initialFile, lang, query, t, user]);
 
   const handleApproval = useCallback(async (reqId: string, decision: "APPROVED" | "REJECTED") => {
     const req = requests.find((r) => r.id === reqId);
@@ -1156,6 +1207,16 @@ export default function CampusAgentApp() {
                   </button>
                 </div>
                 <textarea value={query} onChange={(e) => setQuery(e.target.value)} placeholder={t.enterQuery + " (voice or native language supported)"} className="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 resize-none transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_16px_30px_rgba(14,165,233,0.1)]" rows={5} />
+                <DocumentPanel
+                  documents={[]}
+                  threadId=""
+                  viewerRole="student"
+                  pendingFile={initialFile}
+                  onFileChange={setInitialFile}
+                  onUpload={() => {}}
+                  uploading={false}
+                  deferUpload
+                />
                 <div className="mt-5 flex gap-4">
                   <Btn variant="primary" size="lg" onClick={handleSubmitRequest} loading={submitting} className="flex-1">{t.submitRequest}</Btn>
                 </div>
