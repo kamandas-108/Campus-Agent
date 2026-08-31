@@ -6,11 +6,14 @@ import base64
 import hashlib
 import hmac
 import html
+import mimetypes
+import asyncpg
+from pathlib import Path
 from datetime import datetime
 from typing import TypedDict, Literal, Optional, Dict, Any, List, cast
-from fastapi import FastAPI, Request, BackgroundTasks, HTTPException, Query
+from fastapi import FastAPI, Request, BackgroundTasks, HTTPException, Query, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.responses import JSONResponse, HTMLResponse, Response
 from pydantic import BaseModel, SecretStr
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
@@ -176,6 +179,142 @@ app.add_middleware(
 # a real deploy), but unlike before, both the student and faculty UIs now
 # read from this single shared store instead of separate local React state.
 _requests_store: Dict[str, Dict[str, Any]] = {}
+
+ALLOWED_DOCUMENT_EXTENSIONS = {".pdf", ".doc", ".docx", ".jpg", ".jpeg", ".png", ".xls", ".xlsx"}
+
+
+class DocumentStore:
+    """Two-way document exchange for a request thread: students attach
+    supporting documents, faculty attach approval letters/certificates —
+    each request can carry any number of files from either side.
+
+    Tries Postgres (the `documents` table from init.sql) first since file
+    bytes shouldn't only live in process memory. Falls back to an
+    in-memory dict when Postgres is unreachable, mirroring how
+    CryptographicAuditLogger degrades, so uploads still work in local dev
+    without a database.
+    """
+
+    def __init__(self, db_url: str):
+        self.db_url = db_url
+        # document_id -> {id, thread_id, filename, content_type, uploaded_by, created_at, file_data}
+        self._memory: Dict[str, Dict[str, Any]] = {}
+
+    @staticmethod
+    def _meta(record: Dict[str, Any]) -> Dict[str, Any]:
+        return {k: v for k, v in record.items() if k != "file_data"}
+
+    async def save(self, thread_id: str, filename: str, content_type: str, uploaded_by: str, file_data: bytes) -> Dict[str, Any]:
+        document_id = str(uuid.uuid4())
+        created_at = datetime.utcnow().isoformat() + "Z"
+        record = {
+            "id": document_id, "thread_id": thread_id, "filename": filename,
+            "content_type": content_type, "uploaded_by": uploaded_by, "created_at": created_at,
+        }
+        try:
+            conn = await asyncpg.connect(self.db_url)
+        except Exception:
+            self._memory[document_id] = {**record, "file_data": file_data}
+            return record
+
+        try:
+            await conn.execute(
+                """
+                INSERT INTO documents (id, thread_id, filename, content_type, uploaded_by, file_data, created_at)
+                VALUES ($1::uuid, $2, $3, $4, $5, $6, $7)
+                """,
+                document_id, thread_id, filename, content_type, uploaded_by, file_data, created_at,
+            )
+            return record
+        except Exception as exc:
+            print(f"Document DB save failed, falling back to memory: {exc}")
+            self._memory[document_id] = {**record, "file_data": file_data}
+            return record
+        finally:
+            await conn.close()
+
+    async def list_for_thread(self, thread_id: str) -> List[Dict[str, Any]]:
+        results = [self._meta(r) for r in self._memory.values() if r["thread_id"] == thread_id]
+        try:
+            conn = await asyncpg.connect(self.db_url)
+        except Exception:
+            return sorted(results, key=lambda r: r.get("created_at", ""))
+
+        try:
+            rows = await conn.fetch(
+                "SELECT id, thread_id, filename, content_type, uploaded_by, created_at "
+                "FROM documents WHERE thread_id = $1 ORDER BY created_at ASC",
+                thread_id,
+            )
+            for row in rows:
+                created_at = row["created_at"]
+                results.append({
+                    "id": str(row["id"]), "thread_id": row["thread_id"], "filename": row["filename"],
+                    "content_type": row["content_type"], "uploaded_by": row["uploaded_by"],
+                    "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else created_at,
+                })
+        except Exception:
+            pass
+        finally:
+            await conn.close()
+        return sorted(results, key=lambda r: r.get("created_at", ""))
+
+    async def get(self, document_id: str) -> Optional[Dict[str, Any]]:
+        if document_id in self._memory:
+            return dict(self._memory[document_id])
+        try:
+            conn = await asyncpg.connect(self.db_url)
+        except Exception:
+            return None
+        try:
+            row = await conn.fetchrow(
+                "SELECT id, thread_id, filename, content_type, uploaded_by, file_data, created_at "
+                "FROM documents WHERE id = $1::uuid",
+                document_id,
+            )
+            if not row:
+                return None
+            created_at = row["created_at"]
+            return {
+                "id": str(row["id"]), "thread_id": row["thread_id"], "filename": row["filename"],
+                "content_type": row["content_type"], "uploaded_by": row["uploaded_by"],
+                "file_data": bytes(row["file_data"]),
+                "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else created_at,
+            }
+        except Exception:
+            return None
+        finally:
+            await conn.close()
+
+    async def delete(self, document_id: str) -> Optional[Dict[str, Any]]:
+        record = self._memory.pop(document_id, None)
+        if record:
+            return self._meta(record)
+        try:
+            conn = await asyncpg.connect(self.db_url)
+        except Exception:
+            return None
+        try:
+            row = await conn.fetchrow(
+                "DELETE FROM documents WHERE id = $1::uuid "
+                "RETURNING id, thread_id, filename, content_type, uploaded_by, created_at",
+                document_id,
+            )
+            if not row:
+                return None
+            created_at = row["created_at"]
+            return {
+                "id": str(row["id"]), "thread_id": row["thread_id"], "filename": row["filename"],
+                "content_type": row["content_type"], "uploaded_by": row["uploaded_by"],
+                "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else created_at,
+            }
+        except Exception:
+            return None
+        finally:
+            await conn.close()
+
+
+document_store = DocumentStore(POSTGRES_DSN)
 
 # ─── EMAIL HELPERS ───
 def _display(value: Any, fallback: str = "-") -> str:
@@ -594,7 +733,76 @@ async def get_requests(student_email: Optional[str] = Query(default=None)):
     if student_email:
         items = [r for r in items if r.get("student_email") == student_email]
     items.sort(key=lambda r: r.get("created_at", ""), reverse=True)
-    return {"requests": items}
+
+    enriched: List[Dict[str, Any]] = []
+    for item in items:
+        item = dict(item)
+        docs = await document_store.list_for_thread(item["thread_id"])
+        for doc in docs:
+            doc["download_url"] = f"{PUBLIC_API_URL}/api/document/{doc['id']}"
+        item["documents"] = docs
+        enriched.append(item)
+    return {"requests": enriched}
+
+# ── Document upload / download / delete (two-way: student <-> faculty) ──
+@app.post("/api/document/upload")
+async def upload_document(
+    thread_id: str = Form(...),
+    uploaded_by: Literal["student", "faculty"] = Form(...),
+    file: UploadFile = File(...),
+):
+    if thread_id not in _requests_store:
+        raise HTTPException(status_code=404, detail="Request not found")
+
+    filename = Path(file.filename or "document").name
+    ext = Path(filename).suffix.lower()
+    if ext and ext not in ALLOWED_DOCUMENT_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Supported files: PDF, Word, images, and Excel")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    content_type = file.content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    record = await document_store.save(thread_id, filename, content_type, uploaded_by, content)
+    record["download_url"] = f"{PUBLIC_API_URL}/api/document/{record['id']}"
+
+    try:
+        await audit_logger.log_decision(
+            thread_id, uploaded_by, "UPLOADED", "DOCUMENT_UPLOAD",
+            {"document_id": record["id"], "filename": filename, "uploaded_by": uploaded_by},
+        )
+    except Exception:
+        pass
+
+    return {"status": "success", "document": record}
+
+
+@app.get("/api/document/{document_id}")
+async def download_document(document_id: str):
+    record = await document_store.get(document_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return Response(
+        content=record["file_data"],
+        media_type=record.get("content_type") or "application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{record["filename"]}"'},
+    )
+
+
+@app.delete("/api/document/{document_id}")
+async def delete_document(document_id: str):
+    record = await document_store.delete(document_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Document not found")
+    try:
+        await audit_logger.log_decision(
+            record["thread_id"], record.get("uploaded_by", "system"), "DELETED", "DOCUMENT_DELETE",
+            {"document_id": document_id, "filename": record.get("filename")},
+        )
+    except Exception:
+        pass
+    return {"status": "deleted", "document_id": document_id}
 
 async def _apply_decision(
     thread_id: str,
