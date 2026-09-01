@@ -199,3 +199,4 @@ class CryptographicAuditLogger:
         except Exception:
             pass
         self._memory_log = []
+
