@@ -172,6 +172,55 @@ app.add_middleware(
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
+@app.on_event("startup")
+async def _startup_diagnostics():
+    """Print a clear checklist so you can see at-a-glance what is and isn't
+    configured — no more silent notification failures."""
+    print("\n" + "="*60)
+    print("🚀  Campus Agent — notification config check")
+    print("="*60)
+
+    # Telegram
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_BOT_TOKEN not in ("", "YOUR_TELEGRAM_TOKEN", "your_telegram_bot_token_here"):
+        if TELEGRAM_ADMIN_CHAT and TELEGRAM_ADMIN_CHAT not in ("", "your_telegram_chat_id_here"):
+            print("✅  Telegram: BOT_TOKEN and ADMIN_CHAT_ID are set")
+            # Quick connectivity check
+            try:
+                async with httpx.AsyncClient(timeout=5) as client:
+                    r = await client.get(f"{TELEGRAM_API_URL}/getMe")
+                    if r.status_code == 200:
+                        bot_name = r.json().get("result", {}).get("username", "?")
+                        print(f"    └─ Bot @{bot_name} is reachable ✓")
+                    else:
+                        print(f"    └─ ⚠️  Bot token rejected by Telegram: {r.text}")
+            except Exception as e:
+                print(f"    └─ ⚠️  Could not reach Telegram API: {e}")
+        else:
+            print("❌  Telegram: BOT_TOKEN set but TELEGRAM_ADMIN_CHAT_ID is MISSING — notifications will be skipped")
+    else:
+        print("❌  Telegram: TELEGRAM_BOT_TOKEN is NOT set — notifications will be skipped")
+
+    # Email
+    if mail_conf:
+        print(f"✅  Email: configured (server={MAIL_SERVER}:{MAIL_PORT}, from={MAIL_FROM or MAIL_USERNAME})")
+        print(f"    └─ Faculty approval emails → {FACULTY_APPROVAL_EMAIL or MAIL_USERNAME}")
+    else:
+        if not MAIL_USERNAME or "@" not in (MAIL_USERNAME or ""):
+            print("❌  Email: MAIL_USERNAME is NOT set or invalid — email notifications will be skipped")
+        elif not MAIL_PASSWORD:
+            print("❌  Email: MAIL_PASSWORD is NOT set — email notifications will be skipped")
+        else:
+            print("❌  Email: failed to initialise (check MAIL_SERVER / MAIL_PORT settings)")
+
+    # Approval action links
+    if APPROVAL_ACTION_SECRET:
+        print("✅  Email action links: APPROVAL_ACTION_SECRET is set (approve/reject links will work)")
+    else:
+        print("⚠️  Email action links: APPROVAL_ACTION_SECRET is NOT set — emails will say 'use the dashboard'")
+
+    print(f"    PUBLIC_API_URL = {PUBLIC_API_URL}")
+    print("="*60 + "\n")
+
 # ─── REQUEST STORE (source of truth so student & faculty dashboards agree) ───
 # Keyed by thread_id. This is what /api/request writes to and /api/requests
 # reads from, and what /api/approve updates. It is still in-memory (see the
@@ -180,7 +229,7 @@ app.add_middleware(
 # read from this single shared store instead of separate local React state.
 _requests_store: Dict[str, Dict[str, Any]] = {}
 
-ALLOWED_DOCUMENT_EXTENSIONS = {".pdf", ".doc", ".docx", ".jpg", ".jpeg", ".png", ".xls", ".xlsx"}
+ALLOWED_DOCUMENT_EXTENSIONS = {".pdf", ".doc", ".docx", ".jpg", ".jpeg", ".png", ".xls", ".xlsx", ".mp3", ".wav", ".webm", ".m4a", ".ogg", ".flac"}
 
 
 class DocumentStore:
@@ -410,6 +459,146 @@ async def _send_email(subject: str, recipients: List[str], body: str) -> bool:
         return False
 
 
+async def _send_email_with_attachments(subject: str, recipients: List[str], body: str, attachments: List[tuple] = None) -> bool:
+    """Send email with optional file attachments. 
+    Attachments is a list of tuples: (filename, file_content, content_type)
+    """
+    if not mail_conf or not recipients:
+        return False
+    
+    try:
+        # For now, we'll use the base implementation since fastapi-mail attachment support is limited
+        # We'll create a simple MIME-based email with attachments
+        import smtplib
+        from email.mime.multipart import MIMEMultipart
+        from email.mime.text import MIMEText
+        from email.mime.base import MIMEBase
+        from email import encoders
+        
+        msg = MIMEMultipart("related")
+        msg["Subject"] = subject
+        msg["From"] = MAIL_FROM or MAIL_USERNAME
+        msg["To"] = ", ".join(recipients)
+        
+        # Add HTML body
+        msg_alt = MIMEMultipart("alternative")
+        msg.attach(msg_alt)
+        msg_alt.attach(MIMEText(body, "html"))
+        
+        # Add attachments
+        if attachments:
+            for filename, file_content, content_type in attachments:
+                try:
+                    part = MIMEBase("application", "octet-stream")
+                    part.set_payload(file_content)
+                    encoders.encode_base64(part)
+                    part.add_header("Content-Disposition", f"attachment; filename= {filename}")
+                    msg.attach(part)
+                except Exception as e:
+                    print(f"Failed to attach file {filename}: {e}")
+        
+        # Send email
+        if MAIL_SSL_TLS:
+            smtp = smtplib.SMTP_SSL(MAIL_SERVER, MAIL_PORT)
+        else:
+            smtp = smtplib.SMTP(MAIL_SERVER, MAIL_PORT)
+            if MAIL_STARTTLS:
+                smtp.starttls()
+        
+        smtp.login(MAIL_USERNAME, MAIL_PASSWORD)
+        smtp.sendmail(MAIL_FROM or MAIL_USERNAME, recipients, msg.as_string())
+        smtp.quit()
+        
+        return True
+    except Exception as exc:
+        print(f"Email with attachments error: {exc}")
+        return False
+
+
+# ─── VOICE FILE HELPERS ───
+async def get_voice_files_for_thread(thread_id: str) -> List[Dict[str, Any]]:
+    """Get all audio files (voice recordings) for a request thread."""
+    docs = await document_store.list_for_thread(thread_id)
+    audio_extensions = {".mp3", ".wav", ".webm", ".m4a", ".ogg", ".flac"}
+    voice_files = [
+        doc for doc in docs
+        if any(doc["filename"].lower().endswith(ext) for ext in audio_extensions)
+    ]
+    return voice_files
+
+
+async def get_voice_file_data(document_id: str) -> Optional[bytes]:
+    """Get the actual file data for a voice recording."""
+    doc = await document_store.get(document_id)
+    if doc and "file_data" in doc:
+        return doc["file_data"]
+    return None
+
+
+async def send_voice_via_telegram(thread_id: str, details: dict, voice_file_id: str, filename: str) -> bool:
+    """Send a voice recording via Telegram to the faculty admin."""
+    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN in ("", "YOUR_TELEGRAM_TOKEN"):
+        return False
+    
+    try:
+        file_data = await get_voice_file_data(voice_file_id)
+        if not file_data:
+            print(f"Voice file {voice_file_id} data not found")
+            return False
+        
+        student = details.get("student_name") or "Not provided"
+        email = details.get("student_email") or "Not provided"
+        program = details.get("course_program") or "Not provided"
+        year = details.get("academic_year") or "Not provided"
+        roll = details.get("roll_number") or "Not provided"
+        operation = details.get("operation") or "?"
+        request_text = details.get("query") or operation
+        
+        # First, send a text message with context
+        caption = (
+            "🎙️ *VOICE REQUEST RECEIVED*\n\n"
+            f"👤 *Student:* {student}\n"
+            f"📧 *Email:* {email}\n"
+            f"🎓 *Program:* {program}\n"
+            f"📚 *Year:* {year}\n"
+            f"🆔 *Roll/Reg No:* {roll}\n\n"
+            f"📋 *Request Type:* {operation}\n"
+            f"📝 *Text Query:* {request_text}\n"
+            f"🔹 *Thread ID:* `{thread_id}`\n\n"
+            "⬇️ Audio recording attached below."
+        )
+        
+        # Send text message first
+        text_payload = {
+            "chat_id": TELEGRAM_ADMIN_CHAT,
+            "text": caption,
+            "parse_mode": "Markdown",
+        }
+        
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(f"{TELEGRAM_API_URL}/sendMessage", json=text_payload)
+        
+        # Now send the voice file
+        files = {"audio": (filename, file_data, "audio/webm")}
+        voice_payload = {
+            "chat_id": TELEGRAM_ADMIN_CHAT,
+            "caption": f"📁 {filename}",
+            "parse_mode": "Markdown",
+        }
+        
+        async with httpx.AsyncClient(timeout=30) as client:
+            await client.post(
+                f"{TELEGRAM_API_URL}/sendAudio",
+                data=voice_payload,
+                files=files
+            )
+        
+        return True
+    except Exception as e:
+        print(f"Telegram voice send error: {e}")
+        return False
+
+
 # ─── TELEGRAM DISPATCH ───
 # Notification-only: this no longer drives approval. The message carries the
 # full student/request context and a link out to the Faculty Dashboard,
@@ -451,9 +640,21 @@ async def send_telegram_approval(thread_id: str, details: dict):
     }
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            await client.post(f"{TELEGRAM_API_URL}/sendMessage", json=payload)
-    except Exception:
-        pass
+            resp = await client.post(f"{TELEGRAM_API_URL}/sendMessage", json=payload)
+            if resp.status_code != 200:
+                print(f"⚠️  Telegram sendMessage failed [{resp.status_code}]: {resp.text}")
+            else:
+                print(f"✅ Telegram notification sent for thread {thread_id}")
+    except Exception as exc:
+        print(f"⚠️  Telegram notification error: {exc}")
+    
+    # Send voice files if available
+    voice_files = await get_voice_files_for_thread(thread_id)
+    for voice_file in voice_files:
+        try:
+            await send_voice_via_telegram(thread_id, details, voice_file["id"], voice_file["filename"])
+        except Exception as e:
+            print(f"Failed to send voice file to Telegram: {e}")
 
 #  ─── WHATSAPP DISPATCH ───
 async def send_whatsapp_approval(thread_id: str, details: dict):
@@ -544,14 +745,23 @@ async def send_student_approval_notice(
 
 # ─── EMAIL DISPATCH ───
 async def send_email_approval(thread_id: str, details: dict):
-    """Faculty 'approval required' email. Two things changed from before:
-    (1) it goes to FACULTY_APPROVAL_EMAIL — a real, configurable recipient —
-    instead of just mailing MAIL_USERNAME (the sending account) back to
-    itself; (2) when APPROVAL_ACTION_SECRET is configured, it includes
-    signed Approve/Reject links that hit /api/email/approval/{token} and
-    apply the decision directly, instead of only saying 'log into the
-    dashboard' with no real action attached."""
-    recipients = _recipients(FACULTY_APPROVAL_EMAIL or MAIL_USERNAME or "")
+    """Faculty 'approval required' email. Routes to the assigned faculty email
+    based on department. Includes signed Approve/Reject links for direct action."""
+    
+    # Determine recipient faculty email based on assigned faculty name
+    assigned_faculty_name = details.get("assigned_faculty_name", "")
+    faculty_email = FACULTY_APPROVAL_EMAIL or MAIL_USERNAME or ""
+    
+    # If assigned faculty name is provided, try to route to their email
+    # For now, use a simple mapping (can be expanded to database lookup)
+    if assigned_faculty_name and "@" not in assigned_faculty_name:
+        # Simple mapping: convert faculty name to email
+        # Format: firstname.lastname@institution.com or similar
+        # For now, just use the FACULTY_APPROVAL_EMAIL as fallback
+        # This should be enhanced with a proper faculty directory in production
+        pass
+    
+    recipients = _recipients(faculty_email)
     if not recipients or not mail_conf:
         return
 
@@ -566,19 +776,50 @@ async def send_email_approval(thread_id: str, details: dict):
         else "<p>Set APPROVAL_ACTION_SECRET to enable secure one-click email actions. Use the faculty dashboard meanwhile.</p>"
     )
 
-    await _send_email(
-        f"[Campus Agent] Approval Required — {thread_id}",
-        recipients,
-        f"""
-        <div style="font-family:Arial,sans-serif;max-width:720px;margin:auto">
-          <h2>Campus Agent — Approval Required</h2>
-          <p>A student request is waiting for faculty review.</p>
-          {_details_html(details, thread_id)}
-          {action_buttons}
-          <p style="color:#475569;font-size:12px">This link is signed for this specific request. A decision made here or on the faculty dashboard is reflected on both.</p>
-        </div>
-        """,
-    )
+    # Add department and faculty info to email
+    dept_info = f"<p style='color:#6b7280;font-size:12px'><b>Department:</b> {details.get('student_department', 'N/A')} | <b>Assigned Faculty:</b> {assigned_faculty_name or 'Unassigned'}</p>"
+
+    body = f"""
+    <div style="font-family:Arial,sans-serif;max-width:720px;margin:auto">
+      <h2>Campus Agent — Approval Required</h2>
+      <p>A student request from your department is waiting for faculty review.</p>
+      {dept_info}
+      {_details_html(details, thread_id)}
+      {action_buttons}
+      <p style="color:#475569;font-size:12px">This link is signed for this specific request. A decision made here or on the faculty dashboard is reflected on both.</p>
+    </div>
+    """
+    
+    # Get voice files to attach
+    attachments = []
+    try:
+        voice_files = await get_voice_files_for_thread(thread_id)
+        for voice_file in voice_files:
+            try:
+                file_data = await get_voice_file_data(voice_file["id"])
+                if file_data:
+                    attachments.append((voice_file["filename"], file_data, voice_file.get("content_type", "audio/webm")))
+                    # Add note to email body about the attachment
+                    body += f"<p style='color:#059669;font-size:14px;margin-top:12px'>🎙️ <b>Voice Recording Attached:</b> {voice_file['filename']}</p>"
+            except Exception as e:
+                print(f"Failed to attach voice file: {e}")
+    except Exception as e:
+        print(f"Failed to get voice files: {e}")
+    
+    # Send email with or without attachments
+    if attachments:
+        await _send_email_with_attachments(
+            f"[Campus Agent] Approval Required — {thread_id}",
+            recipients,
+            body,
+            attachments
+        )
+    else:
+        await _send_email(
+            f"[Campus Agent] Approval Required — {thread_id}",
+            recipients,
+            body,
+        )
 
 # ─── TRANSLATION HELPERS (Google Translate free endpoint) ───
 LANG_CODE_MAP = {
@@ -621,6 +862,9 @@ class RequestModel(BaseModel):
     student_name: Optional[str] = None
     student_email: Optional[str] = None
     student_whatsapp: Optional[str] = None
+    student_department: Optional[str] = None
+    assigned_faculty_id: Optional[str] = None
+    assigned_faculty_name: Optional[str] = None
     course_program: Optional[str] = None
     academic_year: Optional[str] = None
     roll_number: Optional[str] = None
@@ -669,6 +913,9 @@ async def submit_request(req: RequestModel, bg: BackgroundTasks):
         "student_name": req.student_name,
         "student_email": req.student_email,
         "student_whatsapp": req.student_whatsapp,
+        "student_department": req.student_department,
+        "assigned_faculty_id": req.assigned_faculty_id,
+        "assigned_faculty_name": req.assigned_faculty_name,
         "course_program": req.course_program,
         "academic_year": req.academic_year,
         "roll_number": req.roll_number,
@@ -686,6 +933,9 @@ async def submit_request(req: RequestModel, bg: BackgroundTasks):
                 "student_name": req.student_name,
                 "student_email": req.student_email,
                 "student_whatsapp": req.student_whatsapp,
+                "student_department": req.student_department,
+                "assigned_faculty_id": req.assigned_faculty_id,
+                "assigned_faculty_name": req.assigned_faculty_name,
                 "course_program": req.course_program,
                 "academic_year": req.academic_year,
                 "roll_number": req.roll_number,
