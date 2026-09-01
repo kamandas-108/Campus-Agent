@@ -30,15 +30,31 @@ services:
       - "8000:8000"
     environment:
       - POSTGRES_DSN=postgresql://postgres:password@db:5432/campus_ai_db
-      # ⚠️  Set these in a .env file — never hardcode secrets in docker-compose
+      # ── Telegram ──────────────────────────────────────────────────────────
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       - TELEGRAM_ADMIN_CHAT_ID=${TELEGRAM_ADMIN_CHAT_ID:-}
+      - FACULTY_DASHBOARD_URL=${FACULTY_DASHBOARD_URL:-http://localhost:3000}
+      # ── Email (SMTP) ───────────────────────────────────────────────────────
+      - MAIL_USERNAME=${MAIL_USERNAME:-}
+      - MAIL_PASSWORD=${MAIL_PASSWORD:-}
+      - MAIL_FROM=${MAIL_FROM:-}
+      - MAIL_SERVER=${MAIL_SERVER:-smtp.gmail.com}
+      - MAIL_PORT=${MAIL_PORT:-587}
+      - MAIL_STARTTLS=${MAIL_STARTTLS:-true}
+      - MAIL_SSL_TLS=${MAIL_SSL_TLS:-false}
+      - FACULTY_APPROVAL_EMAIL=${FACULTY_APPROVAL_EMAIL:-}
+      # PUBLIC_API_URL must be reachable from OUTSIDE Docker (faculty click
+      # the approve/reject links from their email client). Set this to your
+      # server's public address or ngrok URL during local dev.
+      - PUBLIC_API_URL=${PUBLIC_API_URL:-http://localhost:8000}
+      - APPROVAL_ACTION_SECRET=${APPROVAL_ACTION_SECRET:-}
+      # ── Twilio / WhatsApp ─────────────────────────────────────────────────
       - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID:-}
       - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN:-}
       - TWILIO_WHATSAPP_NUMBER=${TWILIO_WHATSAPP_NUMBER:-whatsapp:+14155238886}
       - ADMIN_WHATSAPP_NUMBER=${ADMIN_WHATSAPP_NUMBER:-}
-      - MAIL_USERNAME=${MAIL_USERNAME:-}
-      - MAIL_PASSWORD=${MAIL_PASSWORD:-}
+      - TWILIO_WHATSAPP_CONTENT_SID=${TWILIO_WHATSAPP_CONTENT_SID:-}
+      - TWILIO_WHATSAPP_APPROVAL_CONTENT_SID=${TWILIO_WHATSAPP_APPROVAL_CONTENT_SID:-}
     depends_on:
       db:
         condition: service_healthy
@@ -52,7 +68,10 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      # Inside Docker, the frontend server-side code must reach the backend
+      # via the container name. For browser (client-side) fetches the value
+      # is baked into the Next.js build, so keep it as the public address.
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     depends_on:
       - backend
 
