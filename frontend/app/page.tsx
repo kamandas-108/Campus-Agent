@@ -3,6 +3,42 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+const DEPARTMENTS = [
+  { code: "cse-aiml", label: "B.Tech CSE (AI/ML)", icon: "🤖" },
+  { code: "cse-core", label: "B.Tech CSE (Core)", icon: "💻" },
+  { code: "ece", label: "B.Tech ECE", icon: "📡" },
+  { code: "mech", label: "B.Tech Mechanical", icon: "⚙️" },
+  { code: "civil", label: "B.Tech Civil", icon: "🏗️" },
+  { code: "eee", label: "B.Tech EEE", icon: "⚡" },
+];
+
+const FACULTY_DIRECTORY: Record<string, Array<{ id: string; name: string; email: string; phone: string }>> = {
+  "cse-aiml": [
+    { id: "fac_001", name: "Dr. Rajesh Kumar", email: "rajesh@college.edu", phone: "+91-9876543210" },
+    { id: "fac_002", name: "Prof. Sneha Sharma", email: "sneha@college.edu", phone: "+91-9876543211" },
+    { id: "fac_003", name: "Dr. Amit Verma", email: "amit@college.edu", phone: "+91-9876543212" },
+  ],
+  "cse-core": [
+    { id: "fac_004", name: "Dr. Priya Singh", email: "priya@college.edu", phone: "+91-9876543213" },
+    { id: "fac_005", name: "Prof. Vikram Patel", email: "vikram@college.edu", phone: "+91-9876543214" },
+    { id: "fac_006", name: "Dr. Neha Gupta", email: "neha@college.edu", phone: "+91-9876543215" },
+  ],
+  "ece": [
+    { id: "fac_007", name: "Dr. Suresh Desai", email: "suresh@college.edu", phone: "+91-9876543216" },
+    { id: "fac_008", name: "Prof. Anjali Iyer", email: "anjali@college.edu", phone: "+91-9876543217" },
+  ],
+  "mech": [
+    { id: "fac_009", name: "Dr. Arjun Rao", email: "arjun@college.edu", phone: "+91-9876543218" },
+    { id: "fac_010", name: "Prof. Meera Reddy", email: "meera@college.edu", phone: "+91-9876543219" },
+  ],
+  "civil": [
+    { id: "fac_011", name: "Dr. Rohan Kapoor", email: "rohan@college.edu", phone: "+91-9876543220" },
+  ],
+  "eee": [
+    { id: "fac_012", name: "Dr. Pooja Nair", email: "pooja@college.edu", phone: "+91-9876543221" },
+  ],
+};
+
 const LANGS = [
   { code: "en", native: "English", flag: "🇬🇧" },
   { code: "hi", native: "हिंदी", flag: "🇮🇳" },
@@ -46,6 +82,14 @@ const TRANSLATIONS: Record<string, Record<string, string>> = {
     rejectedStatus: "Rejected",
     viewDetails: "View Details",
     name: "Full Name",
+    department: "Department",
+    selectDepartment: "Select Your Department",
+    assignedFaculty: "Assigned Faculty",
+    changeFaculty: "Change Faculty",
+    facultyName: "Faculty Name",
+    selectFaculty: "Select Faculty",
+    noDept: "Please select a department",
+    deptInfo: "Your assigned faculty for",
   },
   hi: {
     appTitle: "कैम्पस एजेंट",
@@ -80,6 +124,14 @@ const TRANSLATIONS: Record<string, Record<string, string>> = {
     rejectedStatus: "अस्वीकृत",
     viewDetails: "विवरण देखें",
     name: "पूरा नाम",
+    department: "विभाग",
+    selectDepartment: "अपना विभाग चुनें",
+    assignedFaculty: "नियुक्त संकाय",
+    changeFaculty: "संकाय बदलें",
+    facultyName: "संकाय नाम",
+    selectFaculty: "संकाय चुनें",
+    noDept: "कृपया एक विभाग चुनें",
+    deptInfo: "आपका नियुक्त संकाय",
   },
   bn: {
     appTitle: "ক্যাম্পাস এজেন্ট",
@@ -114,6 +166,14 @@ const TRANSLATIONS: Record<string, Record<string, string>> = {
     rejectedStatus: "প্রত্যাখ্যান করা হয়েছে",
     viewDetails: "বিবরণ দেখুন",
     name: "সম্পূর্ণ নাম",
+    department: "বিভাগ",
+    selectDepartment: "আপনার বিভাগ নির্বাচন করুন",
+    assignedFaculty: "নিযুক্ত অনুষদ",
+    changeFaculty: "অনুষদ পরিবর্তন করুন",
+    facultyName: "অনুষদের নাম",
+    selectFaculty: "অনুষদ নির্বাচন করুন",
+    noDept: "দয়া করে একটি বিভাগ নির্বাচন করুন",
+    deptInfo: "আপনার নিযুক্ত অনুষদ",
   },
   te: {
     appTitle: "క్యాంపస్ ఏజెంట్",
@@ -226,9 +286,12 @@ interface User {
   phone: string;
   whatsapp: string;
   name: string;
+  department?: string;
   courseProgram?: string;
   academicYear?: string;
   rollNumber?: string;
+  assignedFacultyId?: string;
+  assignedFacultyName?: string;
 }
 
 interface DocumentItem {
@@ -250,6 +313,9 @@ interface Request {
   studentName?: string;
   studentEmail?: string;
   studentWhatsapp?: string;
+  studentDepartment?: string;
+  assignedFacultyId?: string;
+  assignedFacultyName?: string;
   studentProgram?: string;
   studentYear?: string;
   studentRollNo?: string;
@@ -669,6 +735,9 @@ function mapBackendRequest(r: any): Request {
     studentName: r.student_name,
     studentEmail: r.student_email,
     studentWhatsapp: r.student_whatsapp,
+    studentDepartment: r.student_department,
+    assignedFacultyId: r.assigned_faculty_id,
+    assignedFacultyName: r.assigned_faculty_name,
     studentProgram: r.course_program,
     studentYear: r.academic_year,
     studentRollNo: r.roll_number,
@@ -697,6 +766,17 @@ export default function CampusAgentApp() {
   const [initialFile, setInitialFile] = useState<File | null>(null);
   const [isListening, setIsListening] = useState(false);
   const recognitionRef = useRef<any>(null);
+  
+  // Voice recording state
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordedAudioBlob, setRecordedAudioBlob] = useState<Blob | null>(null);
+  const [isPlayingVoiceRecording, setIsPlayingVoiceRecording] = useState(false);
+  const [voiceRecordingTime, setVoiceRecordingTime] = useState(0);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const recordingTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const audioPlaybackRef = useRef<HTMLAudioElement | null>(null);
 
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
@@ -706,6 +786,30 @@ export default function CampusAgentApp() {
   const [courseProgram, setCourseProgram] = useState("");
   const [academicYear, setAcademicYear] = useState("");
   const [rollNumber, setRollNumber] = useState("");
+  const [department, setDepartment] = useState("");
+  const [selectedFacultyId, setSelectedFacultyId] = useState("");
+  // All faculty who have logged in via the Faculty Login page — stored as an
+  // array so multiple faculty can be online at once. The student picks one
+  // from a dropdown to route their request to that faculty.
+  const [allFacultiesOnline, setAllFacultiesOnline] = useState<{ name: string; email: string }[]>(() => {
+    try {
+      const stored = window.localStorage.getItem("faculty_logged_in");
+      if (!stored) return [];
+      const parsed = JSON.parse(stored);
+      // Handle legacy single-object format from previous version
+      return Array.isArray(parsed) ? parsed : [parsed];
+    } catch { return []; }
+  });
+  const [selectedFaculty, setSelectedFaculty] = useState<{ name: string; email: string } | null>(() => {
+    try {
+      const stored = window.localStorage.getItem("faculty_logged_in");
+      if (!stored) return null;
+      const parsed = JSON.parse(stored);
+      const list = Array.isArray(parsed) ? parsed : [parsed];
+      return list[0] || null;
+    } catch { return null; }
+  });
+  const [facultyDropdownOpen, setFacultyDropdownOpen] = useState(false);
 
   const t = TRANSLATIONS[lang] || TRANSLATIONS.en;
 
@@ -735,6 +839,17 @@ export default function CampusAgentApp() {
       // ignore corrupted storage
     }
   }, []);
+
+  // Close faculty dropdown when clicking outside
+  useEffect(() => {
+    if (!facultyDropdownOpen) return;
+    const handler = (e: MouseEvent) => {
+      const target = e.target as Element;
+      if (!target.closest("[data-faculty-dropdown]")) setFacultyDropdownOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [facultyDropdownOpen]);
 
   // ─── Fetch requests from the backend (source of truth) ───
   const fetchRequests = useCallback(async (activeUser: User | null) => {
@@ -797,14 +912,102 @@ export default function CampusAgentApp() {
     recognition.start();
   }, [addToast, lang]);
 
+  // ─── Voice Recording Handlers ───
+  const handleStartVoiceRecording = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+      
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (event) => {
+        audioChunksRef.current.push(event.data);
+      };
+
+      mediaRecorder.onstop = () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+        setRecordedAudioBlob(audioBlob);
+        stream.getTracks().forEach((track) => track.stop());
+      };
+
+      mediaRecorder.start();
+      setIsRecording(true);
+      setVoiceRecordingTime(0);
+
+      // Update recording time every second
+      recordingTimerRef.current = setInterval(() => {
+        setVoiceRecordingTime((prev) => prev + 1);
+      }, 1000);
+
+      addToast("Voice recording started", "info");
+    } catch (error) {
+      addToast("Unable to access microphone. Please check permissions.", "error");
+      console.error("Microphone access error:", error);
+    }
+  }, [addToast]);
+
+  const handleStopVoiceRecording = useCallback(() => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+      if (recordingTimerRef.current) {
+        clearInterval(recordingTimerRef.current);
+      }
+      addToast("Voice recording stopped", "success");
+    }
+  }, [isRecording, addToast]);
+
+  const handlePlayVoiceRecording = useCallback(() => {
+    if (recordedAudioBlob) {
+      const url = URL.createObjectURL(recordedAudioBlob);
+      const audio = new Audio(url);
+      audioPlaybackRef.current = audio;
+
+      audio.onplay = () => setIsPlayingVoiceRecording(true);
+      audio.onended = () => {
+        setIsPlayingVoiceRecording(false);
+        URL.revokeObjectURL(url);
+      };
+
+      audio.play().catch((error) => {
+        addToast("Unable to play recording", "error");
+        console.error("Playback error:", error);
+      });
+    }
+  }, [recordedAudioBlob, addToast]);
+
+  const handleStopPlayback = useCallback(() => {
+    if (audioPlaybackRef.current) {
+      audioPlaybackRef.current.pause();
+      audioPlaybackRef.current.currentTime = 0;
+      setIsPlayingVoiceRecording(false);
+    }
+  }, []);
+
+  const handleDeleteVoiceRecording = useCallback(() => {
+    handleStopPlayback();
+    setRecordedAudioBlob(null);
+    setVoiceRecordingTime(0);
+    audioChunksRef.current = [];
+    addToast("Voice recording deleted", "info");
+  }, [handleStopPlayback, addToast]);
+
+  const formatTime = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, "0")}`;
+  };
+
   const handleLogin = useCallback(() => {
     if (!email || !phone || !whatsapp || !password) {
       addToast("Please fill in all fields", "warn");
       return;
     }
 
-    if (loginRole === "student" && (!courseProgram || !academicYear || !rollNumber)) {
-      addToast("Please add course, year, and roll/registration number", "warn");
+    if (loginRole === "student" && (!courseProgram || !academicYear || !rollNumber || !department)) {
+      addToast("Please add course, year, roll/registration number, and department", "warn");
       return;
     }
 
@@ -815,6 +1018,7 @@ export default function CampusAgentApp() {
       phone,
       whatsapp,
       name: name || email.split("@")[0],
+      department: loginRole === "student" ? department : undefined,
       courseProgram: loginRole === "student" ? courseProgram : undefined,
       academicYear: loginRole === "student" ? academicYear : undefined,
       rollNumber: loginRole === "student" ? rollNumber : undefined,
@@ -824,6 +1028,23 @@ export default function CampusAgentApp() {
     setView(loginRole === "student" ? "student" : "faculty");
     try {
       window.localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(newUser));
+      // When a faculty logs in, add them to the online faculty list so students
+      // can see and choose which faculty to route their request to.
+      if (loginRole === "faculty") {
+        const facultyInfo = { name: newUser.name, email: newUser.email };
+        try {
+          const stored = window.localStorage.getItem("faculty_logged_in");
+          const existing: { name: string; email: string }[] = stored
+            ? (() => { const p = JSON.parse(stored); return Array.isArray(p) ? p : [p]; })()
+            : [];
+          const updated = existing.some(f => f.email === facultyInfo.email)
+            ? existing
+            : [...existing, facultyInfo];
+          window.localStorage.setItem("faculty_logged_in", JSON.stringify(updated));
+          setAllFacultiesOnline(updated);
+          setSelectedFaculty(prev => prev || facultyInfo);
+        } catch { /* ignore */ }
+      }
     } catch {
       // storage may be unavailable (private mode) — session just won't persist
     }
@@ -837,12 +1058,15 @@ export default function CampusAgentApp() {
     setCourseProgram("");
     setAcademicYear("");
     setRollNumber("");
+    setDepartment("");
+    setSelectedFacultyId("");
     setLoginRole(null);
-  }, [addToast, academicYear, courseProgram, email, loginRole, name, password, phone, rollNumber, t, whatsapp]);
+  }, [addToast, academicYear, courseProgram, email, loginRole, name, password, phone, rollNumber, t, whatsapp, department, selectedFacultyId]);
+
 
   const handleSubmitRequest = useCallback(async () => {
-    if (!query.trim()) {
-      addToast("Please enter a request", "warn");
+    if (!query.trim() && !recordedAudioBlob) {
+      addToast("Please enter a request or record a voice note", "warn");
       return;
     }
 
@@ -856,7 +1080,7 @@ export default function CampusAgentApp() {
 
     try {
       let translatedQuery = query;
-      if (lang !== "en") {
+      if (lang !== "en" && query) {
         try {
           const transRes = await fetch(`${API}/api/translate`, {
             method: "POST",
@@ -877,10 +1101,13 @@ export default function CampusAgentApp() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           thread_id: threadId,
-          user_query: translatedQuery,
+          user_query: translatedQuery || (recordedAudioBlob ? "[Voice Request - Audio attached]" : ""),
           student_name: user.name,
           student_email: user.email,
           student_whatsapp: user.whatsapp,
+          student_department: user.department || "",
+          assigned_faculty_id: "",
+          assigned_faculty_name: selectedFaculty?.name || "",
           course_program: user.courseProgram || "",
           academic_year: user.academicYear || "",
           roll_number: user.rollNumber || "",
@@ -888,10 +1115,28 @@ export default function CampusAgentApp() {
       });
 
       if (res.ok) {
-        // Now that the request has a real thread_id, upload whatever
-        // document the student attached before submitting. Don't set
-        // Content-Type manually — the browser sets the correct multipart
-        // boundary for FormData automatically.
+        // Upload voice recording if available
+        if (recordedAudioBlob) {
+          const formData = new FormData();
+          formData.append("thread_id", threadId);
+          formData.append("uploaded_by", "student");
+          const voiceFile = new File([recordedAudioBlob], `voice-request-${threadId}.webm`, { type: "audio/webm" });
+          formData.append("file", voiceFile);
+
+          try {
+            const uploadRes = await fetch(`${API}/api/document/upload`, {
+              method: "POST",
+              body: formData,
+            });
+            if (!uploadRes.ok) {
+              addToast("Request submitted, but voice file upload failed", "warn");
+            }
+          } catch {
+            addToast("Request submitted, but voice file upload failed", "warn");
+          }
+        }
+
+        // Upload supporting document if available
         if (initialFile) {
           const formData = new FormData();
           formData.append("thread_id", threadId);
@@ -919,6 +1164,8 @@ export default function CampusAgentApp() {
         addToast(t.submitted, "success");
         setQuery("");
         setInitialFile(null);
+        setRecordedAudioBlob(null);
+        setVoiceRecordingTime(0);
       } else {
         addToast("Request could not be submitted", "error");
       }
@@ -927,7 +1174,7 @@ export default function CampusAgentApp() {
     }
 
     setSubmitting(false);
-  }, [addNotification, addToast, fetchRequests, initialFile, lang, query, t, user]);
+  }, [addNotification, addToast, fetchRequests, initialFile, lang, query, t, user, recordedAudioBlob]);
 
   const handleApproval = useCallback(async (reqId: string, decision: "APPROVED" | "REJECTED") => {
     const req = requests.find((r) => r.id === reqId);
@@ -1024,6 +1271,7 @@ export default function CampusAgentApp() {
   }, [addNotification, addToast, fetchRequests, pendingFiles, user]);
 
   const handleLogout = useCallback(() => {
+    const wasFaculty = user?.role === "faculty";
     setUser(null);
     setView("login");
     setLoginRole(null);
@@ -1031,11 +1279,31 @@ export default function CampusAgentApp() {
     setQuery("");
     try {
       window.localStorage.removeItem(USER_STORAGE_KEY);
+      // When a faculty logs out, remove only them from the online list
+      if (wasFaculty && user) {
+        try {
+          const stored = window.localStorage.getItem("faculty_logged_in");
+          const existing: { name: string; email: string }[] = stored
+            ? (() => { const p = JSON.parse(stored); return Array.isArray(p) ? p : [p]; })()
+            : [];
+          const updated = existing.filter(f => f.email !== user.email);
+          if (updated.length === 0) {
+            window.localStorage.removeItem("faculty_logged_in");
+          } else {
+            window.localStorage.setItem("faculty_logged_in", JSON.stringify(updated));
+          }
+          setAllFacultiesOnline(updated);
+          setSelectedFaculty(prev => {
+            if (!prev || prev.email === user.email) return updated[0] || null;
+            return prev;
+          });
+        } catch { /* ignore */ }
+      }
     } catch {
       // ignore
     }
     addToast("Logout successful", "info");
-  }, [addToast]);
+  }, [addToast, user]);
 
   useEffect(() => {
     const refreshAudit = async () => {
@@ -1113,23 +1381,46 @@ export default function CampusAgentApp() {
               </div>
             </div>
           ) : (
-            <div className="bg-slate-900/70 border border-slate-700/50 rounded-2xl p-8 max-w-md mx-auto">
-              <h2 className="text-3xl font-bold mb-6">{loginRole === "student" ? t.studentLogin : t.facultyLogin}</h2>
+            <div className="bg-gradient-to-br from-purple-900/50 via-indigo-900/40 to-blue-900/50 border border-purple-500/30 rounded-2xl p-8 max-w-md mx-auto shadow-lg shadow-purple-500/20">
+              <h2 className="text-3xl font-bold mb-6 bg-gradient-to-r from-cyan-300 to-blue-300 bg-clip-text text-transparent">{loginRole === "student" ? t.studentLogin : t.facultyLogin}</h2>
 
               <div className="space-y-4">
-                  <input type="text" placeholder={t.name} value={name} onChange={(e) => setName(e.target.value)} className="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_10px_24px_rgba(34,211,238,0.12)]" />
-                    <input type="email" placeholder={t.email} value={email} onChange={(e) => setEmail(e.target.value)} className="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_10px_24px_rgba(34,211,238,0.12)]" />
-                    <input type="tel" placeholder={t.phone} value={phone} onChange={(e) => setPhone(e.target.value)} className="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_10px_24px_rgba(34,211,238,0.12)]" />
-                    <input type="tel" placeholder={t.whatsapp} value={whatsapp} onChange={(e) => setWhatsapp(e.target.value)} className="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_10px_24px_rgba(34,211,238,0.12)]" />
-                {loginRole === "student" && (
+                  <input type="text" placeholder={t.name} value={name} onChange={(e) => setName(e.target.value)} className="w-full bg-gradient-to-r from-indigo-900/50 to-purple-900/50 border border-purple-500/30 rounded-lg px-4 py-2 text-white placeholder-slate-400 focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 transition-all duration-200" />
+                    <input type="email" placeholder={t.email} value={email} onChange={(e) => setEmail(e.target.value)} className="w-full bg-gradient-to-r from-indigo-900/50 to-purple-900/50 border border-purple-500/30 rounded-lg px-4 py-2 text-white placeholder-slate-400 focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 transition-all duration-200" />
+                    <input type="tel" placeholder={t.phone} value={phone} onChange={(e) => setPhone(e.target.value)} className="w-full bg-gradient-to-r from-indigo-900/50 to-purple-900/50 border border-purple-500/30 rounded-lg px-4 py-2 text-white placeholder-slate-400 focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 transition-all duration-200" />
+                    <input type="tel" placeholder={t.whatsapp} value={whatsapp} onChange={(e) => setWhatsapp(e.target.value)} className="w-full bg-gradient-to-r from-indigo-900/50 to-purple-900/50 border border-purple-500/30 rounded-lg px-4 py-2 text-white placeholder-slate-400 focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 transition-all duration-200" />
+                
+                {loginRole === "student" ? (
                   <>
-                    <input type="text" placeholder="Course Program" value={courseProgram} onChange={(e) => setCourseProgram(e.target.value)} className="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_10px_24px_rgba(34,211,238,0.12)]" />
-                    <input type="text" placeholder="Year" value={academicYear} onChange={(e) => setAcademicYear(e.target.value)} className="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_10px_24px_rgba(34,211,238,0.12)]" />
-                    <input type="text" placeholder="College Roll No / Registration No" value={rollNumber} onChange={(e) => setRollNumber(e.target.value)} className="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_10px_24px_rgba(34,211,238,0.12)]" />
+                    <input type="text" placeholder="Course Program" value={courseProgram} onChange={(e) => setCourseProgram(e.target.value)} className="w-full bg-gradient-to-r from-indigo-900/50 to-purple-900/50 border border-purple-500/30 rounded-lg px-4 py-2 text-white placeholder-slate-400 focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 transition-all duration-200" />
+                    <input type="text" placeholder="Year" value={academicYear} onChange={(e) => setAcademicYear(e.target.value)} className="w-full bg-gradient-to-r from-indigo-900/50 to-purple-900/50 border border-purple-500/30 rounded-lg px-4 py-2 text-white placeholder-slate-400 focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 transition-all duration-200" />
+                    <input type="text" placeholder="College Roll No / Registration No" value={rollNumber} onChange={(e) => setRollNumber(e.target.value)} className="w-full bg-gradient-to-r from-indigo-900/50 to-purple-900/50 border border-purple-500/30 rounded-lg px-4 py-2 text-white placeholder-slate-400 focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 transition-all duration-200" />
+                    
+                    <div>
+                      <label className="block text-sm font-semibold text-cyan-300 mb-2">📚 {t.selectDepartment}</label>
+                      <select value={department} onChange={(e) => { setDepartment(e.target.value); }} className="w-full bg-gradient-to-r from-indigo-900/50 to-purple-900/50 border border-purple-500/30 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 transition-all duration-200">
+                        <option value="">-- Select Department --</option>
+                        {DEPARTMENTS.map(dept => (
+                          <option key={dept.code} value={dept.code}>{dept.icon} {dept.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div>
+                      <label className="block text-sm font-semibold text-emerald-300 mb-2">📚 {t.selectDepartment}</label>
+                      <select value={department} onChange={(e) => setDepartment(e.target.value)} className="w-full bg-gradient-to-r from-indigo-900/50 to-purple-900/50 border border-purple-500/30 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 transition-all duration-200">
+                        <option value="">-- Select Your Department --</option>
+                        {DEPARTMENTS.map(dept => (
+                          <option key={dept.code} value={dept.code}>{dept.icon} {dept.label}</option>
+                        ))}
+                      </select>
+                    </div>
                   </>
                 )}
 
-                <input type="password" placeholder={t.password} value={password} onChange={(e) => setPassword(e.target.value)} className="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500" />
+                <input type="password" placeholder={t.password} value={password} onChange={(e) => setPassword(e.target.value)} className="w-full bg-gradient-to-r from-indigo-900/50 to-purple-900/50 border border-purple-500/30 rounded-lg px-4 py-2 text-white placeholder-slate-400 focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 transition-all duration-200" />
 
                 <Btn variant="primary" className="w-full" onClick={handleLogin}>{t.login}</Btn>
                 <Btn variant="ghost" className="w-full" onClick={() => setLoginRole(null)}>← Back</Btn>
@@ -1138,11 +1429,11 @@ export default function CampusAgentApp() {
           )}
 
           <div className="mt-8 flex justify-center gap-2 relative">
-            <button onClick={() => setLangOpen(!langOpen)} className="bg-slate-800/80 border border-slate-700 rounded-lg px-4 py-2 hover:border-cyan-500/50 transition-all">{t.language}: {getLanguageName(lang)}</button>
+            <button onClick={() => setLangOpen(!langOpen)} className="bg-gradient-to-r from-purple-500/20 to-pink-500/20 border border-purple-400/30 rounded-lg px-4 py-2 hover:border-cyan-400/50 transition-all text-purple-200">{t.language}: {getLanguageName(lang)}</button>
             {langOpen && (
-              <div className="absolute top-12 bg-slate-900 border border-slate-700 rounded-lg overflow-hidden z-50">
+              <div className="absolute top-12 bg-slate-900/95 border border-purple-400/30 rounded-lg overflow-hidden z-50">
                 {LANGS.map((item) => (
-                  <button key={item.code} onClick={() => { setLang(item.code); setLangOpen(false); }} className="block w-full text-left px-4 py-2 hover:bg-slate-800">{item.flag} {item.native}</button>
+                  <button key={item.code} onClick={() => { setLang(item.code); setLangOpen(false); }} className="block w-full text-left px-4 py-2 hover:bg-purple-500/20">{item.flag} {item.native}</button>
                 ))}
               </div>
             )}
@@ -1162,23 +1453,68 @@ export default function CampusAgentApp() {
     const studentRequests = requests.filter((req) => req.studentEmail === user.email);
 
     return (
-      <div className="min-h-screen text-slate-100 font-sans" style={{ background: "linear-gradient(135deg, #0a0f1e 0%, #1a0f2e 100%)" }}>
-        <header className="border-b border-slate-700/50 bg-slate-900/70 backdrop-blur-sm sticky top-0 z-40">
+      <div className="min-h-screen text-slate-100 font-sans" style={{ background: "linear-gradient(135deg, #0f0a1e 0%, #1a0a2e 20%, #16213e 50%, #0f0a1e 100%)" }}>
+        <header className="border-b border-purple-500/30 bg-gradient-to-r from-purple-900/40 via-indigo-900/40 to-purple-900/40 backdrop-blur-lg sticky top-0 z-40 shadow-lg shadow-purple-500/10">
           <div className="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <div className="text-3xl">🚀</div>
+              <div className="text-3xl animate-bounce">🚀</div>
               <div>
-                <h1 className="text-2xl font-bold text-cyan-400">{t.appTitle}</h1>
-                <p className="text-sm text-slate-400">{t.studentDashboard}</p>
+                <h1 className="text-2xl font-bold bg-gradient-to-r from-cyan-400 to-emerald-400 bg-clip-text text-transparent">{t.appTitle}</h1>
+                <p className="text-sm text-purple-300">{t.studentDashboard}</p>
               </div>
             </div>
             <div className="flex items-center gap-4">
+              {allFacultiesOnline.length > 0 && (
+                <div className="relative" data-faculty-dropdown>
+                  <button
+                    onClick={() => setFacultyDropdownOpen(o => !o)}
+                    className="flex items-center gap-2 px-3 py-2 bg-gradient-to-r from-violet-500/20 to-indigo-500/20 border border-violet-500/30 hover:border-violet-400/60 rounded-lg transition-all"
+                  >
+                    <div className="text-right">
+                      <p className="text-[10px] text-violet-300 font-semibold uppercase tracking-wide leading-none mb-0.5">
+                        {allFacultiesOnline.length > 1 ? `${allFacultiesOnline.length} Faculty Online` : "Faculty Online"}
+                      </p>
+                      <p className="text-sm text-violet-200 font-medium leading-none">
+                        👨‍🏫 {selectedFaculty?.name || "Select Faculty"}
+                      </p>
+                    </div>
+                    <span className="text-violet-400 text-xs">{facultyDropdownOpen ? "▲" : "▼"}</span>
+                  </button>
+                  {facultyDropdownOpen && (
+                    <div className="absolute right-0 top-full mt-1 bg-slate-900/98 border border-violet-500/40 rounded-xl shadow-xl shadow-violet-900/30 overflow-hidden z-50 min-w-[220px]">
+                      <p className="text-[10px] text-violet-400 font-semibold uppercase tracking-wider px-3 pt-2.5 pb-1">
+                        Route request to:
+                      </p>
+                      {allFacultiesOnline.map((faculty, idx) => (
+                        <button
+                          key={idx}
+                          onClick={() => { setSelectedFaculty(faculty); setFacultyDropdownOpen(false); }}
+                          className={`w-full text-left px-3 py-2.5 flex items-center gap-2 transition-all text-sm ${
+                            selectedFaculty?.email === faculty.email
+                              ? "bg-violet-600/30 text-violet-100"
+                              : "hover:bg-violet-500/15 text-violet-200"
+                          }`}
+                        >
+                          <span className="text-base">👨‍🏫</span>
+                          <div>
+                            <p className="font-medium leading-none">{faculty.name}</p>
+                            <p className="text-[10px] text-violet-400 mt-0.5">{faculty.email}</p>
+                          </div>
+                          {selectedFaculty?.email === faculty.email && (
+                            <span className="ml-auto text-violet-400 text-xs">✓</span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
               <div className="flex gap-2 relative">
-                <button onClick={() => setLangOpen(!langOpen)} className="bg-slate-800/60 border border-slate-700 rounded-lg px-3 py-2 text-sm hover:border-cyan-500/50">🌐 {getLanguageName(lang)}</button>
+                <button onClick={() => setLangOpen(!langOpen)} className="bg-gradient-to-r from-purple-500/20 to-pink-500/20 border border-purple-400/30 rounded-lg px-3 py-2 text-sm hover:border-cyan-400/50 transition-all text-purple-200">🌐 {getLanguageName(lang)}</button>
                 {langOpen && (
-                  <div className="absolute top-16 right-0 bg-slate-900 border border-slate-700 rounded-lg overflow-hidden z-50">
+                  <div className="absolute top-16 right-0 bg-slate-900/95 border border-purple-400/30 rounded-lg overflow-hidden z-50">
                     {LANGS.map((item) => (
-                      <button key={item.code} onClick={() => { setLang(item.code); setLangOpen(false); }} className="block w-full text-left px-4 py-2 hover:bg-slate-800 text-sm">{item.flag} {item.native}</button>
+                      <button key={item.code} onClick={() => { setLang(item.code); setLangOpen(false); }} className="block w-full text-left px-4 py-2 hover:bg-purple-500/20 text-sm">{item.flag} {item.native}</button>
                     ))}
                   </div>
                 )}
@@ -1191,22 +1527,83 @@ export default function CampusAgentApp() {
         <main className="max-w-7xl mx-auto px-4 py-8">
           <div className="grid grid-cols-1 xl:grid-cols-[1.2fr_0.8fr] gap-8">
             <div className="space-y-8">
-              <div className="bg-slate-900/70 border border-slate-700/50 rounded-2xl p-8">
+              <div className="bg-gradient-to-br from-purple-900/30 via-indigo-900/20 to-blue-900/30 border border-purple-500/30 rounded-2xl p-8 shadow-lg shadow-purple-500/10">
                 <div className="flex items-center justify-between mb-4">
-                  <h2 className="text-2xl font-bold text-cyan-400">Service Requirement</h2>
-                  <span className="text-xs uppercase tracking-[0.2em] text-cyan-300/80">Student Portal</span>
+                  <h2 className="text-2xl font-bold bg-gradient-to-r from-cyan-400 to-blue-400 bg-clip-text text-transparent">Service Requirement</h2>
+                  <span className="text-xs uppercase tracking-[0.2em] text-cyan-300/80 bg-cyan-500/10 px-3 py-1 rounded-full">Student Portal</span>
                 </div>
                 <div className="mb-5 grid grid-cols-2 md:grid-cols-4 gap-2">
                   {["NOC", "Lab Booking", "Leave Certificate", "Conduct Certificate", "Fee Refund", "Event Booking", "Equipment Request", "Voice Request"].map((item) => (
-                    <button key={item} onClick={() => setQuery((prev) => (prev ? `${prev} ${item}` : item))} className="rounded-lg border border-slate-700 bg-slate-800/80 px-3 py-2 text-sm text-slate-200 transition-all duration-200 hover:-translate-y-1 hover:scale-[1.02] hover:border-cyan-500/50 hover:bg-slate-800 hover:shadow-[0_18px_35px_rgba(34,211,238,0.1)]">{item}</button>
+                    <button key={item} onClick={() => setQuery((prev) => (prev ? `${prev} ${item}` : item))} className="rounded-lg border border-purple-400/40 bg-gradient-to-br from-purple-500/10 to-pink-500/10 px-3 py-2 text-sm text-purple-200 transition-all duration-200 hover:-translate-y-1 hover:scale-[1.02] hover:border-emerald-400/50 hover:bg-gradient-to-br hover:from-emerald-500/10 hover:to-cyan-500/10 hover:shadow-[0_18px_35px_rgba(16,185,129,0.15)]">{item}</button>
                   ))}
                 </div>
                 <div className="mb-3 flex flex-wrap gap-3">
-                  <button onClick={handleVoiceInput} className="rounded-lg border border-violet-500/30 bg-violet-500/10 px-3 py-2 text-xs text-violet-200 hover:bg-violet-500/20 transition-all">
+                  <button onClick={handleVoiceInput} className="rounded-lg border border-amber-500/30 bg-gradient-to-r from-amber-500/10 to-orange-500/10 px-3 py-2 text-xs text-amber-200 hover:bg-gradient-to-r hover:from-amber-500/20 hover:to-orange-500/20 transition-all">
                     {isListening ? "🎙️ Listening..." : "🎙️ Speak in native language"}
                   </button>
                 </div>
-                <textarea value={query} onChange={(e) => setQuery(e.target.value)} placeholder={t.enterQuery + " (voice or native language supported)"} className="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 resize-none transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_16px_30px_rgba(14,165,233,0.1)]" rows={5} />
+
+                {/* Voice Recording Section */}
+                <div className="mb-4 rounded-lg border border-purple-500/30 bg-gradient-to-r from-purple-900/30 to-indigo-900/30 p-4">
+                  <p className="mb-3 text-xs uppercase tracking-[0.15em] text-purple-300">🎙️ Voice Request Recording</p>
+                  {!isRecording && !recordedAudioBlob ? (
+                    <button
+                      onClick={handleStartVoiceRecording}
+                      className="w-full rounded-lg bg-gradient-to-r from-red-500 to-rose-500 hover:from-red-600 hover:to-rose-600 px-4 py-2 text-white font-medium transition-all shadow-lg shadow-red-500/20"
+                    >
+                      ⏺️ Start Voice Recording
+                    </button>
+                  ) : isRecording ? (
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm text-red-400 font-semibold">Recording... {formatTime(voiceRecordingTime)}</span>
+                        <button
+                          onClick={handleStopVoiceRecording}
+                          className="rounded-lg bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-700 hover:to-rose-700 px-4 py-2 text-sm text-white font-medium transition-all"
+                        >
+                          ⏹️ Stop Recording
+                        </button>
+                      </div>
+                      <div className="h-1 bg-slate-700 rounded-full overflow-hidden">
+                        <div className="h-full bg-gradient-to-r from-red-500 to-rose-500 animate-pulse" style={{ width: "100%" }}></div>
+                      </div>
+                    </div>
+                  ) : recordedAudioBlob ? (
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm text-emerald-400 font-semibold">✓ Recording saved ({formatTime(voiceRecordingTime)})</span>
+                        <div className="flex gap-2">
+                          {isPlayingVoiceRecording ? (
+                            <button
+                              onClick={handleStopPlayback}
+                              className="rounded-lg bg-gradient-to-r from-cyan-500 to-blue-500 hover:from-cyan-600 hover:to-blue-600 px-3 py-2 text-sm text-white transition-all"
+                            >
+                              ⏸️ Pause
+                            </button>
+                          ) : (
+                            <button
+                              onClick={handlePlayVoiceRecording}
+                              className="rounded-lg bg-cyan-500 hover:bg-cyan-600 px-3 py-2 text-sm text-white transition-all"
+                            >
+                              ▶️ Play
+                            </button>
+                          )}
+                          <button
+                            onClick={handleDeleteVoiceRecording}
+                            className="rounded-lg bg-slate-700 hover:bg-slate-600 px-3 py-2 text-sm text-slate-200 transition-all"
+                          >
+                            🗑️ Delete
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
+                  <p className="mt-2 text-xs text-slate-500">
+                    {recordedAudioBlob ? "Voice note is ready to send with your request." : "Record a voice message to send along with your request to faculty via Telegram & Email."}
+                  </p>
+                </div>
+
+                <textarea value={query} onChange={(e) => setQuery(e.target.value)} placeholder={t.enterQuery + " (voice or native language supported)"} className="w-full bg-gradient-to-br from-purple-900/30 to-indigo-900/30 border border-purple-500/30 rounded-lg px-4 py-3 text-white placeholder-purple-400 focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 resize-none transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_16px_30px_rgba(34,211,238,0.15)]" rows={5} />
                 <DocumentPanel
                   documents={[]}
                   threadId=""
@@ -1222,26 +1619,28 @@ export default function CampusAgentApp() {
                 </div>
               </div>
 
-              <div className="bg-slate-900/70 border border-slate-700/50 rounded-2xl p-8">
+              <div className="bg-gradient-to-br from-amber-900/30 via-amber-800/20 to-orange-900/30 border border-amber-500/30 rounded-2xl p-8 shadow-lg shadow-amber-500/10">
                 <div className="flex items-center justify-between mb-4">
-                  <h2 className="text-2xl font-bold text-amber-300">Human Approval</h2>
-                  <span className="px-3 py-1 rounded-full bg-amber-500/10 text-amber-300 text-xs uppercase">Review required</span>
+                  <h2 className="text-2xl font-bold bg-gradient-to-r from-amber-300 to-orange-300 bg-clip-text text-transparent">Human Approval</h2>
+                  <span className="px-3 py-1 rounded-full bg-amber-500/20 border border-amber-500/30 text-amber-300 text-xs uppercase tracking-wider">Review required</span>
                 </div>
                 <div className="space-y-4">
                   {studentRequests.length === 0 ? (
-                    <p className="text-slate-400">No service requirement has been submitted yet.</p>
+                    <p className="text-amber-300/60">No service requirement has been submitted yet.</p>
                   ) : (
                     studentRequests.slice(0, 3).map((req) => (
-                      <div key={req.id} className="rounded-xl border border-slate-700 bg-slate-800/60 p-4">
+                      <div key={req.id} className="rounded-xl border border-amber-500/20 bg-gradient-to-br from-amber-900/20 to-orange-900/10 p-4 hover:border-amber-500/40 transition-all">
                         <div className="flex items-center justify-between gap-3 mb-2">
                           <h3 className="font-semibold text-white">{req.query}</h3>
-                          <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ${req.status === "pending" ? "bg-amber-500/15 text-amber-200" : req.status === "approved" ? "bg-emerald-500/15 text-emerald-200" : "bg-rose-500/15 text-rose-200"}`}>
+                          <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ${req.status === "pending" ? "bg-amber-500/20 text-amber-200 border border-amber-500/30" : req.status === "approved" ? "bg-emerald-500/20 text-emerald-200 border border-emerald-500/30" : "bg-rose-500/20 text-rose-200 border border-rose-500/30"}`}>
                             {req.status === "pending" ? t.pending : req.status === "approved" ? t.approvedStatus : t.rejectedStatus}
                           </span>
                         </div>
-                        <p className="text-sm text-slate-400 mb-3">{req.details}</p>
+                        {req.studentDepartment && <p className="text-xs text-amber-300 mb-2">📚 Department: {DEPARTMENTS.find(d => d.code === req.studentDepartment)?.label}</p>}
+                        {req.assignedFacultyName && <p className="text-xs text-emerald-300 mb-2">👨‍🏫 Faculty: {req.assignedFacultyName}</p>}
+                        <p className="text-sm text-slate-300 mb-3">{req.details}</p>
                         <div className="flex flex-wrap gap-2">
-                          <button onClick={() => setQuery(req.query)} className="rounded-lg border border-slate-600 bg-slate-900/80 px-3 py-2 text-xs text-slate-200 hover:border-cyan-500/50 transition-all">Edit request</button>
+                          <button onClick={() => setQuery(req.query)} className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200 hover:bg-amber-500/20 transition-all">Edit request</button>
                           {req.status === "approved" && (
                             <button
                               onClick={() => {
@@ -1255,7 +1654,7 @@ export default function CampusAgentApp() {
                                 URL.revokeObjectURL(url);
                                 addToast("Approval notice downloaded", "success");
                               }}
-                              className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200 hover:bg-emerald-500/20 transition-all"
+                              className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200 hover:bg-emerald-500/20 transition-all"
                             >
                               Download Notice
                             </button>
@@ -1278,29 +1677,29 @@ export default function CampusAgentApp() {
             </div>
 
             <div className="space-y-8">
-              <div className="bg-slate-900/70 border border-slate-700/50 rounded-2xl p-8">
+              <div className="bg-gradient-to-br from-violet-900/30 via-purple-900/20 to-indigo-900/30 border border-violet-500/30 rounded-2xl p-8 shadow-lg shadow-violet-500/10">
                 <div className="flex items-center justify-between mb-6">
-                  <h2 className="text-2xl font-bold text-violet-300">Institutional Policy Corpus</h2>
-                  <span className="text-xs uppercase tracking-[0.2em] text-violet-300/80">RAG</span>
+                  <h2 className="text-2xl font-bold bg-gradient-to-r from-violet-300 to-purple-300 bg-clip-text text-transparent">Institutional Policy Corpus</h2>
+                  <span className="text-xs uppercase tracking-[0.2em] text-violet-300/80 bg-violet-500/10 px-3 py-1 rounded-full border border-violet-500/30">RAG</span>
                 </div>
                 <div className="space-y-3">
                   {POLICY_CORPUS.map((policy) => (
-                    <button key={policy.id} onClick={() => setSelectedPolicy(policy)} className="w-full rounded-xl border border-slate-700 bg-slate-800/70 p-4 text-left transition-all duration-200 hover:border-violet-500/50 hover:-translate-y-1 hover:scale-[1.01] hover:shadow-[0_20px_40px_rgba(168,85,247,0.15)]">
+                    <button key={policy.id} onClick={() => setSelectedPolicy(policy)} className="w-full rounded-xl border border-violet-500/20 bg-gradient-to-br from-violet-900/20 to-purple-900/10 p-4 text-left transition-all duration-200 hover:border-violet-500/50 hover:-translate-y-1 hover:scale-[1.01] hover:shadow-[0_20px_40px_rgba(168,85,247,0.2)]">
                       <div className="flex items-center justify-between gap-3">
                         <div>
                           <p className="text-base font-semibold text-white">{policy.title}</p>
-                          <p className="text-xs uppercase tracking-[0.2em] text-slate-400 mt-1">{policy.category}</p>
+                          <p className="text-xs uppercase tracking-[0.2em] text-violet-300/60 mt-1">{policy.category}</p>
                         </div>
-                        <span className="text-xl">→</span>
+                        <span className="text-xl text-violet-300">→</span>
                       </div>
                     </button>
                   ))}
                 </div>
               </div>
 
-              <div className="bg-slate-900/70 border border-slate-700/50 rounded-2xl p-8">
+              <div className="bg-gradient-to-br from-emerald-900/30 via-teal-900/20 to-cyan-900/30 border border-emerald-500/30 rounded-2xl p-8 shadow-lg shadow-emerald-500/10">
                 <div className="flex items-center justify-between mb-6">
-                  <h2 className="text-2xl font-bold text-emerald-300">Audit Ledger</h2>
+                  <h2 className="text-2xl font-bold bg-gradient-to-r from-emerald-300 to-cyan-300 bg-clip-text text-transparent">Audit Ledger</h2>
                   <button onClick={async () => {
                     try {
                       const res = await fetch(`${API}/api/audit/logs`);
@@ -1312,20 +1711,20 @@ export default function CampusAgentApp() {
                     } catch {
                       addToast("Unable to refresh ledger", "error");
                     }
-                  }} className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200 hover:bg-emerald-500/20 transition-all">Refresh</button>
+                  }} className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200 hover:bg-emerald-500/20 transition-all">🔄 Refresh</button>
                 </div>
                 <div className="space-y-3">
                   {auditRecords.length === 0 ? (
-                    <p className="text-slate-400">No audit entries yet.</p>
+                    <p className="text-emerald-300/60">No audit entries yet.</p>
                   ) : (
                     auditRecords.slice(0, 4).map((entry, idx) => (
-                      <div key={`${entry.thread_id ?? "audit"}-${idx}`} className="rounded-xl border border-slate-700 bg-slate-800/60 p-3">
+                      <div key={`${entry.thread_id ?? "audit"}-${idx}`} className="rounded-xl border border-emerald-500/20 bg-gradient-to-br from-emerald-900/20 to-teal-900/10 p-3 hover:border-emerald-500/40 transition-all">
                         <div className="flex items-center justify-between gap-3 mb-1">
                           <p className="text-sm font-medium text-white">{entry.action_type || "Institutional Action"}</p>
-                          <span className="text-[10px] uppercase tracking-[0.18em] text-emerald-300">{entry.decision || "LOGGED"}</span>
+                          <span className="text-[10px] uppercase tracking-[0.18em] text-emerald-300 bg-emerald-500/20 px-2 py-1 rounded">{entry.decision || "LOGGED"}</span>
                         </div>
-                        <p className="text-xs text-slate-400">{entry.thread_id || "Thread"}</p>
-                        <p className="text-[11px] text-slate-500 mt-2">{entry.created_at || "Timestamp unavailable"}</p>
+                        <p className="text-xs text-emerald-300/70">{entry.thread_id || "Thread"}</p>
+                        <p className="text-[11px] text-emerald-300/50 mt-2">{entry.created_at || "Timestamp unavailable"}</p>
                       </div>
                     ))
                   )}
@@ -1337,27 +1736,27 @@ export default function CampusAgentApp() {
 
         {selectedPolicy && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-md p-4 transition-opacity duration-300" onClick={() => setSelectedPolicy(null)}>
-            <div className="w-full max-w-3xl rounded-2xl border border-violet-500/40 bg-slate-900/95 shadow-2xl shadow-violet-500/20 transition-all duration-300" onClick={(e) => e.stopPropagation()}>
-              <div className="flex items-center justify-between border-b border-slate-700 px-6 py-4">
+            <div className="w-full max-w-3xl rounded-2xl border border-violet-500/40 bg-gradient-to-br from-violet-900/40 via-purple-900/30 to-indigo-900/40 shadow-2xl shadow-violet-500/30 transition-all duration-300" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-center justify-between border-b border-violet-500/30 px-6 py-4">
                 <div>
-                  <p className="text-xs uppercase tracking-[0.22em] text-violet-300">Policy</p>
-                  <h3 className="text-2xl font-bold text-white">{selectedPolicy.title}</h3>
+                  <p className="text-xs uppercase tracking-[0.22em] text-violet-300 bg-violet-500/20 px-2 py-1 rounded w-fit">Policy</p>
+                  <h3 className="text-2xl font-bold bg-gradient-to-r from-violet-200 to-purple-200 bg-clip-text text-transparent mt-2">{selectedPolicy.title}</h3>
                 </div>
-                <button onClick={() => setSelectedPolicy(null)} className="rounded-full border border-slate-700 bg-slate-800 px-3 py-1 text-slate-200 hover:border-violet-500/50 transition-all">✕</button>
+                <button onClick={() => setSelectedPolicy(null)} className="rounded-full border border-violet-500/30 bg-violet-500/10 hover:bg-violet-500/20 px-3 py-1 text-violet-200 transition-all">✕</button>
               </div>
 
               <div className="max-h-[70vh] overflow-y-auto px-6 py-5">
-                <p className="mb-5 text-sm text-slate-300">{selectedPolicy.summary}</p>
+                <p className="mb-5 text-sm text-violet-200/80">{selectedPolicy.summary}</p>
                 <div className="mb-5 grid grid-cols-1 md:grid-cols-2 gap-3">
                   {selectedPolicy.highlights.map((item) => (
-                    <div key={item} className="rounded-lg border border-slate-700 bg-slate-800/70 px-3 py-2 text-sm text-slate-200">{item}</div>
+                    <div key={item} className="rounded-lg border border-violet-500/20 bg-violet-500/10 px-3 py-2 text-sm text-violet-200">{item}</div>
                   ))}
                 </div>
                 <div className="space-y-4">
                   {selectedPolicy.sections.map((section) => (
-                    <div key={section.heading} className="rounded-xl border border-slate-700 bg-slate-800/60 p-4">
+                    <div key={section.heading} className="rounded-xl border border-purple-500/20 bg-gradient-to-br from-purple-900/20 to-violet-900/10 p-4">
                       <h4 className="text-base font-semibold text-cyan-300 mb-2">{section.heading}</h4>
-                      <p className="text-sm text-slate-300 leading-7">{section.body}</p>
+                      <p className="text-sm text-purple-200/80 leading-7">{section.body}</p>
                     </div>
                   ))}
                 </div>
