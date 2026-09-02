@@ -190,3 +190,153 @@ def generate_approval_pdf(request: Dict[str, Any]) -> bytes:
 
     doc.build(story)
     return buffer.getvalue()
+
+
+def generate_complaint_ticket_pdf(ticket: Dict[str, Any]) -> bytes:
+    """
+    Generate a downloadable complaint ticket PDF for the given ticket dict.
+    Raises RuntimeError if ReportLab is not installed.
+    """
+    if not REPORTLAB_AVAILABLE:
+        raise RuntimeError(
+            "ReportLab is not installed. Add 'reportlab>=4.0.0' to requirements.txt."
+        )
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=20 * mm,
+        leftMargin=20 * mm,
+        topMargin=20 * mm,
+        bottomMargin=20 * mm,
+    )
+
+    styles = getSampleStyleSheet()
+    BRAND    = colors.HexColor("#dc2626")   # red-600 — distinct from the approval-letter violet
+    BRAND_LT = colors.HexColor("#fee2e2")   # red-100
+    GREY     = colors.HexColor("#475569")
+    WHITE    = colors.white
+
+    title_style = ParagraphStyle(
+        "Title", parent=styles["Title"],
+        textColor=WHITE, fontSize=20, spaceAfter=4, alignment=TA_CENTER,
+    )
+    sub_style = ParagraphStyle(
+        "Sub", parent=styles["Normal"],
+        textColor=colors.HexColor("#fecaca"), fontSize=10,
+        spaceAfter=0, alignment=TA_CENTER,
+    )
+    label_style = ParagraphStyle(
+        "Label", parent=styles["Normal"],
+        textColor=GREY, fontSize=9, spaceAfter=2,
+    )
+    value_style = ParagraphStyle(
+        "Value", parent=styles["Normal"],
+        textColor=colors.HexColor("#0f172a"), fontSize=10, spaceAfter=0,
+    )
+    body_style = ParagraphStyle(
+        "Body", parent=styles["Normal"],
+        textColor=colors.HexColor("#1e293b"), fontSize=10,
+        leading=16, spaceAfter=10,
+    )
+    notice_style = ParagraphStyle(
+        "Notice", parent=styles["Normal"],
+        textColor=colors.HexColor("#7f1d1d"), fontSize=9,
+        leading=14, alignment=TA_CENTER,
+    )
+
+    ticket_id     = ticket.get("ticket_id") or ticket.get("id") or "N/A"
+    subject       = ticket.get("subject") or "N/A"
+    description   = ticket.get("description") or "—"
+    raised_by     = (ticket.get("raised_by") or "N/A").capitalize()
+    raised_by_name  = ticket.get("raised_by_name") or "N/A"
+    raised_by_email = ticket.get("raised_by_email") or "N/A"
+    thread_id     = ticket.get("thread_id") or "—"
+    status        = (ticket.get("status") or "OPEN").upper()
+    created_at    = _format_date(ticket.get("created_at"))
+
+    story = []
+
+    # ── Header banner ──
+    header_data = [[Paragraph("Campus Agent", title_style)],
+                   [Paragraph("Complaint Ticket", sub_style)]]
+    header_table = Table(header_data, colWidths=[170 * mm])
+    header_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), BRAND),
+        ("ROUNDEDCORNERS", [6, 6, 6, 6]),
+        ("TOPPADDING",    (0, 0), (-1, -1), 12),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 12),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 10),
+    ]))
+    story.append(header_table)
+    story.append(Spacer(1, 8 * mm))
+
+    # ── Status badge ──
+    badge_data = [[Paragraph(f"🎫  TICKET {status}", ParagraphStyle(
+        "Badge", parent=styles["Normal"],
+        textColor=BRAND, fontSize=13, alignment=TA_CENTER,
+    ))]]
+    badge_table = Table(badge_data, colWidths=[170 * mm])
+    badge_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), BRAND_LT),
+        ("BOX",        (0, 0), (-1, -1), 1, colors.HexColor("#fca5a5")),
+        ("TOPPADDING",    (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+    ]))
+    story.append(badge_table)
+    story.append(Spacer(1, 6 * mm))
+
+    # ── Details table ──
+    def row(label: str, value: str):
+        return [
+            Paragraph(label, label_style),
+            Paragraph(value or "—", value_style),
+        ]
+
+    detail_rows = [
+        row("Ticket ID",         ticket_id),
+        row("Raised By",         f"{raised_by_name} ({raised_by})"),
+        row("Contact Email",     raised_by_email),
+        row("Related Thread ID", thread_id),
+        row("Subject",           subject),
+        row("Status",            status),
+        row("Raised On",         created_at),
+    ]
+    col_widths = [55 * mm, 115 * mm]
+    detail_table = Table(detail_rows, colWidths=col_widths, repeatRows=0)
+    detail_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (0, -1), BRAND_LT),
+        ("GRID",       (0, 0), (-1, -1), 0.5, colors.HexColor("#e2e8f0")),
+        ("TOPPADDING",    (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 8),
+        ("VALIGN",     (0, 0), (-1, -1), "MIDDLE"),
+    ]))
+    story.append(detail_table)
+    story.append(Spacer(1, 6 * mm))
+
+    # ── Description ──
+    story.append(Paragraph("Description", ParagraphStyle(
+        "SH", parent=styles["Heading3"],
+        textColor=BRAND, spaceAfter=4,
+    )))
+    story.append(Paragraph(description, body_style))
+    story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#e2e8f0")))
+    story.append(Spacer(1, 4 * mm))
+
+    # ── Footer notice ──
+    story.append(Paragraph(
+        "This is an officially generated complaint ticket from Campus Agent. "
+        "Please quote the Ticket ID above in any follow-up correspondence.",
+        notice_style,
+    ))
+    story.append(Spacer(1, 3 * mm))
+    story.append(Paragraph(
+        f"Generated on {datetime.utcnow().strftime('%d %B %Y at %H:%M UTC')}",
+        ParagraphStyle("Ts", parent=styles["Normal"], textColor=GREY,
+                       fontSize=8, alignment=TA_CENTER),
+    ))
+
+    doc.build(story)
+    return buffer.getvalue()
