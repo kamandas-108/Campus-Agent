@@ -281,7 +281,7 @@ const TRANSLATIONS: Record<string, Record<string, string>> = {
 
 interface User {
   id: string;
-  role: "student" | "faculty";
+  role: "student" | "faculty" | "hod" | "admin";
   email: string;
   phone: string;
   whatsapp: string;
@@ -746,8 +746,8 @@ function mapBackendRequest(r: any): Request {
 }
 
 export default function CampusAgentApp() {
-  const [view, setView] = useState<"login" | "student" | "faculty">("login");
-  const [loginRole, setLoginRole] = useState<"student" | "faculty" | null>(null);
+  const [view, setView] = useState<"login" | "student" | "faculty" | "hod" | "admin">("login");
+  const [loginRole, setLoginRole] = useState<"student" | "faculty" | "hod" | "admin" | null>(null);
   const [lang, setLang] = useState("en");
   const [user, setUser] = useState<User | null>(null);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
@@ -832,7 +832,7 @@ export default function CampusAgentApp() {
         const parsed: User = JSON.parse(saved);
         if (parsed && parsed.role) {
           setUser(parsed);
-          setView(parsed.role === "student" ? "student" : "faculty");
+          setView(parsed.role === "student" ? "student" : parsed.role === "faculty" ? "faculty" : parsed.role === "hod" ? "hod" : "admin");
         }
       }
     } catch {
@@ -1025,7 +1025,7 @@ export default function CampusAgentApp() {
     };
 
     setUser(newUser);
-    setView(loginRole === "student" ? "student" : "faculty");
+    setView(loginRole === "student" ? "student" : loginRole === "faculty" ? "faculty" : loginRole === "hod" ? "hod" : "admin");
     try {
       window.localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(newUser));
       // When a faculty logs in, add them to the online faculty list so students
@@ -1365,7 +1365,7 @@ export default function CampusAgentApp() {
           </div>
 
           {!loginRole ? (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 gap-6">
               <div className="bg-slate-900/70 border border-slate-700/50 rounded-2xl p-8 cursor-pointer hover:border-cyan-500/50 transition-all hover:shadow-lg hover:shadow-cyan-500/10" onClick={() => setLoginRole("student")}>
                 <div className="text-5xl mb-4">👨‍🎓</div>
                 <h2 className="text-2xl font-bold mb-2 text-cyan-400">{t.studentLogin}</h2>
@@ -1378,6 +1378,20 @@ export default function CampusAgentApp() {
                 <h2 className="text-2xl font-bold mb-2 text-violet-400">{t.facultyLogin}</h2>
                 <p className="text-slate-400 mb-4">Review and approve student requests with notifications</p>
                 <Btn variant="violet" className="w-full">{t.facultyLogin} →</Btn>
+              </div>
+
+              <div className="bg-slate-900/70 border border-slate-700/50 rounded-2xl p-8 cursor-pointer hover:border-orange-500/50 transition-all hover:shadow-lg hover:shadow-orange-500/10" onClick={() => setLoginRole("hod")}>
+                <div className="text-5xl mb-4">🎓</div>
+                <h2 className="text-2xl font-bold mb-2 text-orange-400">HOD Login</h2>
+                <p className="text-slate-400 mb-4">Handle escalated requests and department oversight</p>
+                <Btn variant="default" className="w-full bg-orange-900/40 border-orange-700/50">HOD Login →</Btn>
+              </div>
+
+              <div className="bg-slate-900/70 border border-slate-700/50 rounded-2xl p-8 cursor-pointer hover:border-rose-500/50 transition-all hover:shadow-lg hover:shadow-rose-500/10 md:col-span-2 lg:col-span-1" onClick={() => setLoginRole("admin")}>
+                <div className="text-5xl mb-4">🔐</div>
+                <h2 className="text-2xl font-bold mb-2 text-rose-400">Admin Login</h2>
+                <p className="text-slate-400 mb-4">Analytics dashboard, audit logs, full system access</p>
+                <Btn variant="danger" className="w-full">Admin Login →</Btn>
               </div>
             </div>
           ) : (
@@ -1519,6 +1533,9 @@ export default function CampusAgentApp() {
                   </div>
                 )}
               </div>
+              <a href="/history" className="inline-flex items-center gap-1 rounded-lg border border-cyan-500/30 bg-cyan-500/10 hover:bg-cyan-500/20 px-3 py-2 text-xs text-cyan-300 transition-all">
+                📜 My History
+              </a>
               <Btn variant="danger" size="sm" onClick={handleLogout}>{t.logout}</Btn>
             </div>
           </div>
@@ -1643,20 +1660,23 @@ export default function CampusAgentApp() {
                           <button onClick={() => setQuery(req.query)} className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200 hover:bg-amber-500/20 transition-all">Edit request</button>
                           {req.status === "approved" && (
                             <button
-                              onClick={() => {
-                                const notice = `Approval Notice\n\nRequest: ${req.query}\nStatus: Approved\nStudent: ${user.name}\nProgram: ${user.courseProgram || "Not provided"}\nYear: ${user.academicYear || "Not provided"}\nRoll No: ${user.rollNumber || "Not provided"}\n\nThis is a digital approval notice issued by the institution. Please keep this copy for records.`;
-                                const blob = new Blob([notice], { type: "text/plain" });
-                                const url = URL.createObjectURL(blob);
-                                const a = document.createElement("a");
-                                a.href = url;
-                                a.download = `${req.threadId}-approval-notice.txt`;
-                                a.click();
-                                URL.revokeObjectURL(url);
-                                addToast("Approval notice downloaded", "success");
+                                  onClick={async () => {
+                                try {
+                                  const res = await fetch(`${API}/api/requests/${req.threadId}/pdf`);
+                                  if (!res.ok) { addToast("PDF generation failed", "error"); return; }
+                                  const blob = await res.blob();
+                                  const url = URL.createObjectURL(blob);
+                                  const a = document.createElement("a");
+                                  a.href = url;
+                                  a.download = `approval-${req.threadId}.pdf`;
+                                  a.click();
+                                  URL.revokeObjectURL(url);
+                                  addToast("Approval PDF downloaded", "success");
+                                } catch { addToast("PDF download error", "error"); }
                               }}
                               className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200 hover:bg-emerald-500/20 transition-all"
                             >
-                              Download Notice
+                              📥 Download PDF
                             </button>
                           )}
                         </div>
@@ -1899,6 +1919,99 @@ export default function CampusAgentApp() {
           {toasts.map((toast) => (
             <Toast key={toast.id} t={toast} onClose={() => rmToast(toast.id)} />
           ))}
+        </div>
+      </div>
+    );
+  }
+
+  if ((view === "hod" || view === "admin") && user) {
+    const pendingRequests = requests.filter((r) => r.status === "pending");
+    const escalatedRequests = requests.filter((r) => (r as any).escalated);
+
+    return (
+      <div className="min-h-screen text-slate-100 font-sans" style={{ background: "linear-gradient(135deg, #0a0f1e 0%, #1a0f2e 100%)" }}>
+        <header className="border-b border-slate-700/50 bg-slate-900/70 backdrop-blur-sm sticky top-0 z-40">
+          <div className="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="text-3xl">{view === "admin" ? "🔐" : "🎓"}</div>
+              <div>
+                <h1 className="text-2xl font-bold text-rose-400">{t.appTitle}</h1>
+                <p className="text-sm text-slate-400">{view === "admin" ? "Admin Dashboard" : "HOD Dashboard"} — {user.name}</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              {view === "admin" && (
+                <a href="/admin" className="inline-flex items-center gap-1 rounded-lg border border-violet-500/30 bg-violet-500/10 hover:bg-violet-500/20 px-3 py-2 text-sm text-violet-300 transition-all">
+                  📊 Analytics
+                </a>
+              )}
+              <Btn variant="danger" size="sm" onClick={handleLogout}>{t.logout}</Btn>
+            </div>
+          </div>
+        </header>
+
+        <main className="max-w-7xl mx-auto px-4 py-8">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+            <div className="bg-amber-900/30 border border-amber-700/50 rounded-lg p-4">
+              <p className="text-amber-400 text-sm font-medium">Pending Requests</p>
+              <p className="text-3xl font-bold text-white mt-2">{pendingRequests.length}</p>
+            </div>
+            <div className="bg-orange-900/30 border border-orange-700/50 rounded-lg p-4">
+              <p className="text-orange-400 text-sm font-medium">🚨 Escalated</p>
+              <p className="text-3xl font-bold text-white mt-2">{escalatedRequests.length}</p>
+            </div>
+            <div className="bg-slate-900/50 border border-slate-700/50 rounded-lg p-4">
+              <p className="text-slate-400 text-sm font-medium">Total</p>
+              <p className="text-3xl font-bold text-white mt-2">{requests.length}</p>
+            </div>
+          </div>
+
+          {escalatedRequests.length > 0 && (
+            <div className="mb-8 bg-orange-900/20 border border-orange-700/40 rounded-2xl p-6">
+              <h2 className="text-xl font-bold text-orange-400 mb-4">🚨 Escalated Requests</h2>
+              <div className="space-y-3">
+                {escalatedRequests.map((req) => (
+                  <div key={req.id} className="bg-orange-900/20 border border-orange-700/30 rounded-lg p-4">
+                    <div className="flex items-center justify-between gap-3 mb-2">
+                      <h3 className="font-semibold text-white">{req.query}</h3>
+                      <span className="text-xs text-orange-300 bg-orange-500/20 px-2 py-1 rounded">ESCALATED</span>
+                    </div>
+                    <p className="text-xs text-slate-400">Student: {req.studentName} | Faculty: {req.assignedFacultyName || "Unassigned"}</p>
+                    <div className="flex gap-3 mt-3">
+                      <Btn variant="success" size="sm" onClick={() => handleApproval(req.id, "APPROVED")}>✅ Approve</Btn>
+                      <Btn variant="danger" size="sm" onClick={() => handleApproval(req.id, "REJECTED")}>❌ Reject</Btn>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="bg-slate-900/70 border border-slate-700/50 rounded-2xl p-8">
+            <h2 className="text-2xl font-bold mb-6 text-violet-400">All Pending Requests</h2>
+            {pendingRequests.length === 0 ? (
+              <p className="text-slate-400 text-center py-8">No pending requests</p>
+            ) : (
+              <div className="space-y-4">
+                {pendingRequests.map((req) => (
+                  <div key={req.id} className="bg-slate-800/50 border border-slate-700/50 rounded-lg p-6">
+                    <div className="flex items-center justify-between gap-3 mb-2">
+                      <h3 className="font-semibold text-white">{req.query}</h3>
+                      <span className="text-xs text-amber-300 bg-amber-500/15 px-2 py-1 rounded-full">{req.status}</span>
+                    </div>
+                    <p className="text-xs text-slate-400 mb-3">Student: {req.studentName} | Dept: {req.studentDepartment} | Faculty: {req.assignedFacultyName}</p>
+                    <div className="flex gap-3">
+                      <Btn variant="success" size="sm" onClick={() => handleApproval(req.id, "APPROVED")}>✅ Approve</Btn>
+                      <Btn variant="danger" size="sm" onClick={() => handleApproval(req.id, "REJECTED")}>❌ Reject</Btn>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </main>
+        <div className="fixed bottom-4 right-4 space-y-2 z-50">
+          {toasts.map((toast) => (<Toast key={toast.id} t={toast} onClose={() => rmToast(toast.id)} />))}
         </div>
       </div>
     );
