@@ -791,24 +791,10 @@ export default function CampusAgentApp() {
   // All faculty who have logged in via the Faculty Login page — stored as an
   // array so multiple faculty can be online at once. The student picks one
   // from a dropdown to route their request to that faculty.
-  const [allFacultiesOnline, setAllFacultiesOnline] = useState<{ name: string; email: string }[]>(() => {
-    try {
-      const stored = window.localStorage.getItem("faculty_logged_in");
-      if (!stored) return [];
-      const parsed = JSON.parse(stored);
-      // Handle legacy single-object format from previous version
-      return Array.isArray(parsed) ? parsed : [parsed];
-    } catch { return []; }
-  });
-  const [selectedFaculty, setSelectedFaculty] = useState<{ name: string; email: string } | null>(() => {
-    try {
-      const stored = window.localStorage.getItem("faculty_logged_in");
-      if (!stored) return null;
-      const parsed = JSON.parse(stored);
-      const list = Array.isArray(parsed) ? parsed : [parsed];
-      return list[0] || null;
-    } catch { return null; }
-  });
+  // Faculty online list is now fetched from the backend so it works across
+  // different browsers / devices. localStorage is no longer used for this.
+  const [allFacultiesOnline, setAllFacultiesOnline] = useState<{ name: string; email: string }[]>([]);
+  const [selectedFaculty, setSelectedFaculty] = useState<{ name: string; email: string } | null>(null);
   const [facultyDropdownOpen, setFacultyDropdownOpen] = useState(false);
 
   const t = TRANSLATIONS[lang] || TRANSLATIONS.en;
@@ -881,6 +867,49 @@ export default function CampusAgentApp() {
 
     return () => window.clearInterval(interval);
   }, [view, user, fetchRequests]);
+
+  // ─── Faculty heartbeat: keep this faculty marked online every 30 s ───
+  useEffect(() => {
+    if (view !== "faculty" || !user) return;
+
+    const sendHeartbeat = async () => {
+      try {
+        await fetch(`${API}/api/faculty/heartbeat`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: user.name, email: user.email }),
+        });
+      } catch { /* network hiccup — next interval will retry */ }
+    };
+
+    void sendHeartbeat(); // immediate ping on mount
+    const hb = window.setInterval(sendHeartbeat, 30_000);
+    return () => window.clearInterval(hb);
+  }, [view, user]);
+
+  // ─── Student dashboard: poll for online faculty list every 10 s ───
+  useEffect(() => {
+    if (view !== "student") return;
+
+    const fetchOnlineFaculty = async () => {
+      try {
+        const res = await fetch(`${API}/api/faculty/online`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const list: { name: string; email: string }[] = data.faculty || [];
+        setAllFacultiesOnline(list);
+        // Auto-select first faculty if none selected or previously selected one went offline
+        setSelectedFaculty(prev => {
+          if (prev && list.some(f => f.email === prev.email)) return prev;
+          return list[0] || null;
+        });
+      } catch { /* ignore */ }
+    };
+
+    void fetchOnlineFaculty(); // immediate fetch
+    const interval = window.setInterval(fetchOnlineFaculty, 10_000);
+    return () => window.clearInterval(interval);
+  }, [view]);
 
   const handleVoiceInput = useCallback(() => {
     const SpeechRecognitionCtor = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -1000,7 +1029,7 @@ export default function CampusAgentApp() {
     return `${mins}:${secs.toString().padStart(2, "0")}`;
   };
 
-  const handleLogin = useCallback(() => {
+  const handleLogin = useCallback(async () => {
     if (!email || !phone || !whatsapp || !password) {
       addToast("Please fill in all fields", "warn");
       return;
@@ -1028,25 +1057,19 @@ export default function CampusAgentApp() {
     setView(loginRole === "student" ? "student" : loginRole === "faculty" ? "faculty" : loginRole === "hod" ? "hod" : "admin");
     try {
       window.localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(newUser));
-      // When a faculty logs in, add them to the online faculty list so students
-      // can see and choose which faculty to route their request to.
-      if (loginRole === "faculty") {
-        const facultyInfo = { name: newUser.name, email: newUser.email };
-        try {
-          const stored = window.localStorage.getItem("faculty_logged_in");
-          const existing: { name: string; email: string }[] = stored
-            ? (() => { const p = JSON.parse(stored); return Array.isArray(p) ? p : [p]; })()
-            : [];
-          const updated = existing.some(f => f.email === facultyInfo.email)
-            ? existing
-            : [...existing, facultyInfo];
-          window.localStorage.setItem("faculty_logged_in", JSON.stringify(updated));
-          setAllFacultiesOnline(updated);
-          setSelectedFaculty(prev => prev || facultyInfo);
-        } catch { /* ignore */ }
-      }
     } catch {
       // storage may be unavailable (private mode) — session just won't persist
+    }
+    // When a faculty logs in, register them as online on the backend so all
+    // student dashboards (any browser/device) can see them in the dropdown.
+    if (loginRole === "faculty") {
+      try {
+        await fetch(`${API}/api/faculty/heartbeat`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: newUser.name, email: newUser.email }),
+        });
+      } catch { /* ignore — heartbeat loop will retry */ }
     }
     addToast(`${t.login} successful!`, "success");
 
@@ -1270,7 +1293,7 @@ export default function CampusAgentApp() {
     setUploadingThread(null);
   }, [addNotification, addToast, fetchRequests, pendingFiles, user]);
 
-  const handleLogout = useCallback(() => {
+  const handleLogout = useCallback(async () => {
     const wasFaculty = user?.role === "faculty";
     setUser(null);
     setView("login");
@@ -1279,28 +1302,17 @@ export default function CampusAgentApp() {
     setQuery("");
     try {
       window.localStorage.removeItem(USER_STORAGE_KEY);
-      // When a faculty logs out, remove only them from the online list
-      if (wasFaculty && user) {
-        try {
-          const stored = window.localStorage.getItem("faculty_logged_in");
-          const existing: { name: string; email: string }[] = stored
-            ? (() => { const p = JSON.parse(stored); return Array.isArray(p) ? p : [p]; })()
-            : [];
-          const updated = existing.filter(f => f.email !== user.email);
-          if (updated.length === 0) {
-            window.localStorage.removeItem("faculty_logged_in");
-          } else {
-            window.localStorage.setItem("faculty_logged_in", JSON.stringify(updated));
-          }
-          setAllFacultiesOnline(updated);
-          setSelectedFaculty(prev => {
-            if (!prev || prev.email === user.email) return updated[0] || null;
-            return prev;
-          });
-        } catch { /* ignore */ }
-      }
-    } catch {
-      // ignore
+    } catch { /* ignore */ }
+    // Notify backend that this faculty is now offline so the dropdown updates
+    // immediately on all student dashboards without waiting for TTL expiry.
+    if (wasFaculty && user) {
+      try {
+        await fetch(`${API}/api/faculty/offline`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: user.name, email: user.email }),
+        });
+      } catch { /* ignore */ }
     }
     addToast("Logout successful", "info");
   }, [addToast, user]);
