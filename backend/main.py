@@ -20,6 +20,9 @@ from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.runnables.config import RunnableConfig
 from audit_service import CryptographicAuditLogger
 from fastapi_mail import FastMail, MessageSchema, ConnectionConfig, MessageType
+from analytics_service import compute_analytics
+from scheduler import run_scheduler
+from pdf_service import generate_approval_pdf
 
 try:
     from twilio.rest import Client as TwilioClient
@@ -220,6 +223,20 @@ async def _startup_diagnostics():
 
     print(f"    PUBLIC_API_URL = {PUBLIC_API_URL}")
     print("="*60 + "\n")
+
+    # Start the deadline reminder / escalation scheduler
+    import asyncio
+    TELEGRAM_SEND_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}" if TELEGRAM_BOT_TOKEN else ""
+    asyncio.create_task(
+        run_scheduler(
+            get_store=lambda: _requests_store,
+            audit_log_fn=audit_logger.log_decision,
+            telegram_api_url=TELEGRAM_SEND_URL,
+            admin_chat=TELEGRAM_ADMIN_CHAT,
+            faculty_dashboard_url=FACULTY_DASHBOARD_URL,
+        )
+    )
+    print("✅  Deadline scheduler started")
 
 # ─── REQUEST STORE (source of truth so student & faculty dashboards agree) ───
 # Keyed by thread_id. This is what /api/request writes to and /api/requests
@@ -921,6 +938,10 @@ async def submit_request(req: RequestModel, bg: BackgroundTasks):
         "roll_number": req.roll_number,
         "query": req.user_query,
         "created_at": datetime.utcnow().isoformat() + "Z",
+        "deadline_at": (datetime.utcnow().replace(second=0, microsecond=0)).isoformat() + "Z",
+        "reminder_sent": False,
+        "escalated": False,
+        "approved_at": None,
     }
 
     try:
@@ -1089,6 +1110,8 @@ async def _apply_decision(
     if stored:
         stored["status"] = new_status
         stored["result"] = result
+        if decision == "APPROVED" and not stored.get("approved_at"):
+            stored["approved_at"] = datetime.utcnow().isoformat() + "Z"
     else:
         # Defensive fallback: decided for a thread we never saw in
         # /api/request (e.g. server restarted). Still record it so the
@@ -1254,6 +1277,58 @@ async def translate_batch(items: List[TranslateModel]):
         translated = await _google_translate(item.text, LANG_CODE_MAP.get(item.to_lang, item.to_lang), LANG_CODE_MAP.get(item.from_lang, "auto"))
         results.append({"original": item.text, "translated": translated, "to_lang": item.to_lang})
     return {"results": results}
+
+
+# ── Analytics (admin-only) ──
+@app.get("/api/analytics")
+async def get_analytics():
+    """Admin analytics dashboard — aggregated request stats."""
+    items = list(_requests_store.values())
+    return compute_analytics(items)
+
+# ── Student request history (own requests only) ──
+@app.get("/api/requests/my")
+async def get_my_requests(student_email: str = Query(...)):
+    """Returns only the authenticated student's requests, newest first."""
+    items = [r for r in _requests_store.values() if r.get("student_email") == student_email]
+    items.sort(key=lambda r: r.get("created_at", ""), reverse=True)
+    enriched = []
+    for item in items:
+        item = dict(item)
+        docs = await document_store.list_for_thread(item["thread_id"])
+        for doc in docs:
+            doc["download_url"] = f"{PUBLIC_API_URL}/api/document/{doc['id']}"
+        item["documents"] = docs
+        enriched.append(item)
+    return {"requests": enriched}
+
+# ── PDF generation for approved requests ──
+@app.get("/api/requests/{request_id}/pdf")
+async def download_request_pdf(request_id: str):
+    """Generate and return an approval-letter PDF for an approved request."""
+    stored = _requests_store.get(request_id)
+    if not stored:
+        raise HTTPException(status_code=404, detail="Request not found")
+    if str(stored.get("status", "")).upper() != "APPROVED":
+        raise HTTPException(status_code=400, detail="PDF is only available for approved requests")
+    try:
+        pdf_bytes = generate_approval_pdf(stored)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    filename = f"approval-{request_id}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+# ── Escalated/overdue requests (HOD view) ──
+@app.get("/api/requests/escalated")
+async def get_escalated_requests():
+    """Returns requests that have been escalated (overdue 48h)."""
+    items = [r for r in _requests_store.values() if r.get("escalated")]
+    items.sort(key=lambda r: r.get("created_at", ""), reverse=True)
+    return {"requests": items}
 
 # ─── NOTE ON PERSISTENCE ───
 # _requests_store is still process memory: it resets on a Render
