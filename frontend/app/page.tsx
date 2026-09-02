@@ -747,11 +747,35 @@ function ComplaintPanel({
   submitting: boolean;
   onDownload: (ticketId: string) => void;
 }) {
+  // Quick-fill demo chips — different presets per role, mirroring the
+  // Service Requirement chips on the student request form.
+  const STUDENT_COMPLAINT_CHIPS = [
+    "Hostel Food Issue", "Ragging", "Indiscipline",
+    "Wi-Fi / Internet Issue", "Washroom Cleanliness", "Library Access Issue",
+  ];
+  const FACULTY_COMPLAINT_CHIPS = [
+    "Student Indiscipline", "Ragging Report", "Classroom Infrastructure",
+    "Lab Equipment Issue", "Attendance Discrepancy", "Exam Malpractice",
+  ];
+  const chips = viewerRole === "student" ? STUDENT_COMPLAINT_CHIPS : FACULTY_COMPLAINT_CHIPS;
+
   return (
     <div className="bg-gradient-to-br from-rose-900/30 via-red-900/20 to-orange-900/30 border border-rose-500/30 rounded-2xl p-8 shadow-lg shadow-rose-500/10">
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-2xl font-bold bg-gradient-to-r from-rose-300 to-orange-300 bg-clip-text text-transparent">🎫 Complaint Tickets</h2>
         <span className="text-xs uppercase tracking-[0.2em] text-rose-300/80 bg-rose-500/10 px-3 py-1 rounded-full">{viewerRole === "student" ? "Your tickets" : "All tickets"}</span>
+      </div>
+
+      <div className="mb-4 grid grid-cols-2 md:grid-cols-3 gap-2">
+        {chips.map((item) => (
+          <button
+            key={item}
+            onClick={() => onSubjectChange(item)}
+            className="rounded-lg border border-rose-400/40 bg-gradient-to-br from-rose-500/10 to-orange-500/10 px-3 py-2 text-sm text-rose-200 transition-all duration-200 hover:-translate-y-1 hover:scale-[1.02] hover:border-amber-400/50 hover:bg-gradient-to-br hover:from-amber-500/10 hover:to-orange-500/10"
+          >
+            {item}
+          </button>
+        ))}
       </div>
 
       <div className="mb-6 space-y-3">
