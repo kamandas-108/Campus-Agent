@@ -322,6 +322,20 @@ interface Request {
   documents: DocumentItem[];
 }
 
+interface ComplaintTicket {
+  id: string;
+  ticketId: string;
+  subject: string;
+  description: string;
+  raisedBy: "student" | "faculty";
+  raisedByName?: string;
+  raisedByEmail?: string;
+  threadId?: string;
+  status: string;
+  createdAt: Date;
+  downloadUrl: string;
+}
+
 type ToastType = "success" | "error" | "warn" | "info";
 interface ToastItem {
   id: string;
@@ -712,6 +726,75 @@ function DocumentPanel({
   );
 }
 
+function ComplaintPanel({
+  viewerRole,
+  complaints,
+  subject,
+  description,
+  onSubjectChange,
+  onDescriptionChange,
+  onSubmit,
+  submitting,
+  onDownload,
+}: {
+  viewerRole: "student" | "faculty";
+  complaints: ComplaintTicket[];
+  subject: string;
+  description: string;
+  onSubjectChange: (v: string) => void;
+  onDescriptionChange: (v: string) => void;
+  onSubmit: () => void;
+  submitting: boolean;
+  onDownload: (ticketId: string) => void;
+}) {
+  return (
+    <div className="bg-gradient-to-br from-rose-900/30 via-red-900/20 to-orange-900/30 border border-rose-500/30 rounded-2xl p-8 shadow-lg shadow-rose-500/10">
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-2xl font-bold bg-gradient-to-r from-rose-300 to-orange-300 bg-clip-text text-transparent">🎫 Complaint Tickets</h2>
+        <span className="text-xs uppercase tracking-[0.2em] text-rose-300/80 bg-rose-500/10 px-3 py-1 rounded-full">{viewerRole === "student" ? "Your tickets" : "All tickets"}</span>
+      </div>
+
+      <div className="mb-6 space-y-3">
+        <input
+          type="text"
+          value={subject}
+          onChange={(e) => onSubjectChange(e.target.value)}
+          placeholder="Complaint subject"
+          className="w-full bg-gradient-to-r from-rose-900/30 to-orange-900/30 border border-rose-500/30 rounded-lg px-4 py-2 text-white placeholder-rose-300/50 focus:outline-none focus:border-rose-400 focus:ring-2 focus:ring-rose-400/20"
+        />
+        <textarea
+          value={description}
+          onChange={(e) => onDescriptionChange(e.target.value)}
+          placeholder="Describe the issue in detail..."
+          rows={3}
+          className="w-full bg-gradient-to-r from-rose-900/30 to-orange-900/30 border border-rose-500/30 rounded-lg px-4 py-2 text-white placeholder-rose-300/50 focus:outline-none focus:border-rose-400 focus:ring-2 focus:ring-rose-400/20 resize-none"
+        />
+        <Btn variant="danger" onClick={onSubmit} loading={submitting}>Raise Complaint</Btn>
+      </div>
+
+      <div className="space-y-3">
+        {complaints.length === 0 ? (
+          <p className="text-rose-300/60">No complaint tickets yet.</p>
+        ) : (
+          complaints.map((c) => (
+            <div key={c.id} className="rounded-xl border border-rose-500/20 bg-gradient-to-br from-rose-900/20 to-orange-900/10 p-4 hover:border-rose-500/40 transition-all">
+              <div className="flex items-center justify-between gap-3 mb-1">
+                <h3 className="font-semibold text-white">{c.subject}</h3>
+                <span className="inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium bg-rose-500/20 text-rose-200 border border-rose-500/30">{c.status}</span>
+              </div>
+              <p className="text-sm text-slate-300 mb-2">{c.description}</p>
+              <p className="text-xs text-rose-300/70 mb-3">
+                Raised by {c.raisedByName || "Unknown"} ({c.raisedBy}) · {c.createdAt.toLocaleString()}
+              </p>
+              <Btn variant="default" size="sm" onClick={() => onDownload(c.ticketId)}>📥 Download Ticket</Btn>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
 
 function mapBackendDocument(d: any): DocumentItem {
   return {
@@ -745,6 +828,22 @@ function mapBackendRequest(r: any): Request {
   };
 }
 
+function mapBackendComplaint(c: any): ComplaintTicket {
+  return {
+    id: c.ticket_id || c.id,
+    ticketId: c.ticket_id || c.id,
+    subject: c.subject || "",
+    description: c.description || "",
+    raisedBy: c.raised_by === "faculty" ? "faculty" : "student",
+    raisedByName: c.raised_by_name,
+    raisedByEmail: c.raised_by_email,
+    threadId: c.thread_id,
+    status: c.status || "OPEN",
+    createdAt: c.created_at ? new Date(c.created_at) : new Date(),
+    downloadUrl: c.download_url || "",
+  };
+}
+
 export default function CampusAgentApp() {
   const [view, setView] = useState<"login" | "student" | "faculty" | "hod" | "admin">("login");
   const [loginRole, setLoginRole] = useState<"student" | "faculty" | "hod" | "admin" | null>(null);
@@ -766,17 +865,6 @@ export default function CampusAgentApp() {
   const [initialFile, setInitialFile] = useState<File | null>(null);
   const [isListening, setIsListening] = useState(false);
   const recognitionRef = useRef<any>(null);
-  
-  // Voice recording state
-  const [isRecording, setIsRecording] = useState(false);
-  const [recordedAudioBlob, setRecordedAudioBlob] = useState<Blob | null>(null);
-  const [isPlayingVoiceRecording, setIsPlayingVoiceRecording] = useState(false);
-  const [voiceRecordingTime, setVoiceRecordingTime] = useState(0);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const recordingTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const audioPlaybackRef = useRef<HTMLAudioElement | null>(null);
 
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
@@ -796,6 +884,12 @@ export default function CampusAgentApp() {
   const [allFacultiesOnline, setAllFacultiesOnline] = useState<{ name: string; email: string }[]>([]);
   const [selectedFaculty, setSelectedFaculty] = useState<{ name: string; email: string } | null>(null);
   const [facultyDropdownOpen, setFacultyDropdownOpen] = useState(false);
+
+  // ─── Complaint tickets (raised by either student or faculty) ───
+  const [complaints, setComplaints] = useState<ComplaintTicket[]>([]);
+  const [complaintSubject, setComplaintSubject] = useState("");
+  const [complaintDescription, setComplaintDescription] = useState("");
+  const [complaintSubmitting, setComplaintSubmitting] = useState(false);
 
   const t = TRANSLATIONS[lang] || TRANSLATIONS.en;
 
@@ -856,6 +950,27 @@ export default function CampusAgentApp() {
     }
   }, []);
 
+  // ─── Fetch complaint tickets from the backend ───
+  // Students see only tickets they raised; faculty see every ticket (from
+  // either side) since faculty may need to review/download any of them.
+  const fetchComplaints = useCallback(async (activeUser: User | null) => {
+    if (!activeUser) return;
+    try {
+      const url =
+        activeUser.role === "student"
+          ? `${API}/api/complaints?raised_by_email=${encodeURIComponent(activeUser.email)}`
+          : `${API}/api/complaints`;
+      const res = await fetch(url);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (Array.isArray(data.complaints)) {
+        setComplaints(data.complaints.map(mapBackendComplaint));
+      }
+    } catch {
+      // network hiccup — keep the last known list, next poll will retry
+    }
+  }, []);
+
   // ─── Poll the backend so student and faculty dashboards always agree ───
   useEffect(() => {
     if ((view !== "student" && view !== "faculty") || !user) return;
@@ -867,6 +982,18 @@ export default function CampusAgentApp() {
 
     return () => window.clearInterval(interval);
   }, [view, user, fetchRequests]);
+
+  // ─── Poll complaint tickets alongside requests ───
+  useEffect(() => {
+    if ((view !== "student" && view !== "faculty") || !user) return;
+
+    void fetchComplaints(user);
+    const interval = window.setInterval(() => {
+      void fetchComplaints(user);
+    }, 5000);
+
+    return () => window.clearInterval(interval);
+  }, [view, user, fetchComplaints]);
 
   // ─── Faculty heartbeat: keep this faculty marked online every 30 s ───
   useEffect(() => {
@@ -941,94 +1068,6 @@ export default function CampusAgentApp() {
     recognition.start();
   }, [addToast, lang]);
 
-  // ─── Voice Recording Handlers ───
-  const handleStartVoiceRecording = useCallback(async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-      
-      const mediaRecorder = new MediaRecorder(stream);
-      mediaRecorderRef.current = mediaRecorder;
-      audioChunksRef.current = [];
-
-      mediaRecorder.ondataavailable = (event) => {
-        audioChunksRef.current.push(event.data);
-      };
-
-      mediaRecorder.onstop = () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
-        setRecordedAudioBlob(audioBlob);
-        stream.getTracks().forEach((track) => track.stop());
-      };
-
-      mediaRecorder.start();
-      setIsRecording(true);
-      setVoiceRecordingTime(0);
-
-      // Update recording time every second
-      recordingTimerRef.current = setInterval(() => {
-        setVoiceRecordingTime((prev) => prev + 1);
-      }, 1000);
-
-      addToast("Voice recording started", "info");
-    } catch (error) {
-      addToast("Unable to access microphone. Please check permissions.", "error");
-      console.error("Microphone access error:", error);
-    }
-  }, [addToast]);
-
-  const handleStopVoiceRecording = useCallback(() => {
-    if (mediaRecorderRef.current && isRecording) {
-      mediaRecorderRef.current.stop();
-      setIsRecording(false);
-      if (recordingTimerRef.current) {
-        clearInterval(recordingTimerRef.current);
-      }
-      addToast("Voice recording stopped", "success");
-    }
-  }, [isRecording, addToast]);
-
-  const handlePlayVoiceRecording = useCallback(() => {
-    if (recordedAudioBlob) {
-      const url = URL.createObjectURL(recordedAudioBlob);
-      const audio = new Audio(url);
-      audioPlaybackRef.current = audio;
-
-      audio.onplay = () => setIsPlayingVoiceRecording(true);
-      audio.onended = () => {
-        setIsPlayingVoiceRecording(false);
-        URL.revokeObjectURL(url);
-      };
-
-      audio.play().catch((error) => {
-        addToast("Unable to play recording", "error");
-        console.error("Playback error:", error);
-      });
-    }
-  }, [recordedAudioBlob, addToast]);
-
-  const handleStopPlayback = useCallback(() => {
-    if (audioPlaybackRef.current) {
-      audioPlaybackRef.current.pause();
-      audioPlaybackRef.current.currentTime = 0;
-      setIsPlayingVoiceRecording(false);
-    }
-  }, []);
-
-  const handleDeleteVoiceRecording = useCallback(() => {
-    handleStopPlayback();
-    setRecordedAudioBlob(null);
-    setVoiceRecordingTime(0);
-    audioChunksRef.current = [];
-    addToast("Voice recording deleted", "info");
-  }, [handleStopPlayback, addToast]);
-
-  const formatTime = (seconds: number) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins}:${secs.toString().padStart(2, "0")}`;
-  };
-
   const handleLogin = useCallback(async () => {
     if (!email || !phone || !whatsapp || !password) {
       addToast("Please fill in all fields", "warn");
@@ -1088,8 +1127,8 @@ export default function CampusAgentApp() {
 
 
   const handleSubmitRequest = useCallback(async () => {
-    if (!query.trim() && !recordedAudioBlob) {
-      addToast("Please enter a request or record a voice note", "warn");
+    if (!query.trim()) {
+      addToast("Please enter a request", "warn");
       return;
     }
 
@@ -1124,7 +1163,7 @@ export default function CampusAgentApp() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           thread_id: threadId,
-          user_query: translatedQuery || (recordedAudioBlob ? "[Voice Request - Audio attached]" : ""),
+          user_query: translatedQuery || "",
           student_name: user.name,
           student_email: user.email,
           student_whatsapp: user.whatsapp,
@@ -1138,27 +1177,6 @@ export default function CampusAgentApp() {
       });
 
       if (res.ok) {
-        // Upload voice recording if available
-        if (recordedAudioBlob) {
-          const formData = new FormData();
-          formData.append("thread_id", threadId);
-          formData.append("uploaded_by", "student");
-          const voiceFile = new File([recordedAudioBlob], `voice-request-${threadId}.webm`, { type: "audio/webm" });
-          formData.append("file", voiceFile);
-
-          try {
-            const uploadRes = await fetch(`${API}/api/document/upload`, {
-              method: "POST",
-              body: formData,
-            });
-            if (!uploadRes.ok) {
-              addToast("Request submitted, but voice file upload failed", "warn");
-            }
-          } catch {
-            addToast("Request submitted, but voice file upload failed", "warn");
-          }
-        }
-
         // Upload supporting document if available
         if (initialFile) {
           const formData = new FormData();
@@ -1187,8 +1205,6 @@ export default function CampusAgentApp() {
         addToast(t.submitted, "success");
         setQuery("");
         setInitialFile(null);
-        setRecordedAudioBlob(null);
-        setVoiceRecordingTime(0);
       } else {
         addToast("Request could not be submitted", "error");
       }
@@ -1197,7 +1213,65 @@ export default function CampusAgentApp() {
     }
 
     setSubmitting(false);
-  }, [addNotification, addToast, fetchRequests, initialFile, lang, query, t, user, recordedAudioBlob]);
+  }, [addNotification, addToast, fetchRequests, initialFile, lang, query, t, user]);
+
+  // ─── Raise a complaint ticket (either student or faculty can do this) ───
+  const handleRaiseComplaint = useCallback(async () => {
+    if (!complaintSubject.trim() || !complaintDescription.trim()) {
+      addToast("Please fill in both subject and description", "warn");
+      return;
+    }
+    if (!user || (user.role !== "student" && user.role !== "faculty")) {
+      addToast("Only student or faculty accounts can raise a ticket", "warn");
+      return;
+    }
+
+    setComplaintSubmitting(true);
+    try {
+      const res = await fetch(`${API}/api/complaint`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          subject: complaintSubject,
+          description: complaintDescription,
+          raised_by: user.role,
+          raised_by_name: user.name,
+          raised_by_email: user.email,
+        }),
+      });
+
+      if (res.ok) {
+        await fetchComplaints(user);
+        addNotification("Complaint ticket raised", `Your ticket "${complaintSubject}" has been logged.`, "system");
+        addToast("Complaint ticket raised", "success");
+        setComplaintSubject("");
+        setComplaintDescription("");
+      } else {
+        addToast("Complaint ticket could not be raised", "error");
+      }
+    } catch {
+      addToast("Complaint submission error", "error");
+    }
+    setComplaintSubmitting(false);
+  }, [addNotification, addToast, complaintDescription, complaintSubject, fetchComplaints, user]);
+
+  // ─── Download a complaint ticket as a PDF ───
+  const handleDownloadComplaintTicket = useCallback(async (ticketId: string) => {
+    try {
+      const res = await fetch(`${API}/api/complaint/${ticketId}/pdf`);
+      if (!res.ok) { addToast("Ticket PDF generation failed", "error"); return; }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `complaint-${ticketId}.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+      addToast("Complaint ticket downloaded", "success");
+    } catch {
+      addToast("Ticket download error", "error");
+    }
+  }, [addToast]);
 
   const handleApproval = useCallback(async (reqId: string, decision: "APPROVED" | "REJECTED") => {
     const req = requests.find((r) => r.id === reqId);
@@ -1562,7 +1636,7 @@ export default function CampusAgentApp() {
                   <span className="text-xs uppercase tracking-[0.2em] text-cyan-300/80 bg-cyan-500/10 px-3 py-1 rounded-full">Student Portal</span>
                 </div>
                 <div className="mb-5 grid grid-cols-2 md:grid-cols-4 gap-2">
-                  {["NOC", "Lab Booking", "Leave Certificate", "Conduct Certificate", "Fee Refund", "Event Booking", "Equipment Request", "Voice Request"].map((item) => (
+                  {["NOC", "Lab Booking", "Leave Certificate", "Conduct Certificate", "Fee Refund", "Event Booking", "Equipment Request"].map((item) => (
                     <button key={item} onClick={() => setQuery((prev) => (prev ? `${prev} ${item}` : item))} className="rounded-lg border border-purple-400/40 bg-gradient-to-br from-purple-500/10 to-pink-500/10 px-3 py-2 text-sm text-purple-200 transition-all duration-200 hover:-translate-y-1 hover:scale-[1.02] hover:border-emerald-400/50 hover:bg-gradient-to-br hover:from-emerald-500/10 hover:to-cyan-500/10 hover:shadow-[0_18px_35px_rgba(16,185,129,0.15)]">{item}</button>
                   ))}
                 </div>
@@ -1570,66 +1644,6 @@ export default function CampusAgentApp() {
                   <button onClick={handleVoiceInput} className="rounded-lg border border-amber-500/30 bg-gradient-to-r from-amber-500/10 to-orange-500/10 px-3 py-2 text-xs text-amber-200 hover:bg-gradient-to-r hover:from-amber-500/20 hover:to-orange-500/20 transition-all">
                     {isListening ? "🎙️ Listening..." : "🎙️ Speak in native language"}
                   </button>
-                </div>
-
-                {/* Voice Recording Section */}
-                <div className="mb-4 rounded-lg border border-purple-500/30 bg-gradient-to-r from-purple-900/30 to-indigo-900/30 p-4">
-                  <p className="mb-3 text-xs uppercase tracking-[0.15em] text-purple-300">🎙️ Voice Request Recording</p>
-                  {!isRecording && !recordedAudioBlob ? (
-                    <button
-                      onClick={handleStartVoiceRecording}
-                      className="w-full rounded-lg bg-gradient-to-r from-red-500 to-rose-500 hover:from-red-600 hover:to-rose-600 px-4 py-2 text-white font-medium transition-all shadow-lg shadow-red-500/20"
-                    >
-                      ⏺️ Start Voice Recording
-                    </button>
-                  ) : isRecording ? (
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm text-red-400 font-semibold">Recording... {formatTime(voiceRecordingTime)}</span>
-                        <button
-                          onClick={handleStopVoiceRecording}
-                          className="rounded-lg bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-700 hover:to-rose-700 px-4 py-2 text-sm text-white font-medium transition-all"
-                        >
-                          ⏹️ Stop Recording
-                        </button>
-                      </div>
-                      <div className="h-1 bg-slate-700 rounded-full overflow-hidden">
-                        <div className="h-full bg-gradient-to-r from-red-500 to-rose-500 animate-pulse" style={{ width: "100%" }}></div>
-                      </div>
-                    </div>
-                  ) : recordedAudioBlob ? (
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm text-emerald-400 font-semibold">✓ Recording saved ({formatTime(voiceRecordingTime)})</span>
-                        <div className="flex gap-2">
-                          {isPlayingVoiceRecording ? (
-                            <button
-                              onClick={handleStopPlayback}
-                              className="rounded-lg bg-gradient-to-r from-cyan-500 to-blue-500 hover:from-cyan-600 hover:to-blue-600 px-3 py-2 text-sm text-white transition-all"
-                            >
-                              ⏸️ Pause
-                            </button>
-                          ) : (
-                            <button
-                              onClick={handlePlayVoiceRecording}
-                              className="rounded-lg bg-cyan-500 hover:bg-cyan-600 px-3 py-2 text-sm text-white transition-all"
-                            >
-                              ▶️ Play
-                            </button>
-                          )}
-                          <button
-                            onClick={handleDeleteVoiceRecording}
-                            className="rounded-lg bg-slate-700 hover:bg-slate-600 px-3 py-2 text-sm text-slate-200 transition-all"
-                          >
-                            🗑️ Delete
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  ) : null}
-                  <p className="mt-2 text-xs text-slate-500">
-                    {recordedAudioBlob ? "Voice note is ready to send with your request." : "Record a voice message to send along with your request to faculty via Telegram & Email."}
-                  </p>
                 </div>
 
                 <textarea value={query} onChange={(e) => setQuery(e.target.value)} placeholder={t.enterQuery + " (voice or native language supported)"} className="w-full bg-gradient-to-br from-purple-900/30 to-indigo-900/30 border border-purple-500/30 rounded-lg px-4 py-3 text-white placeholder-purple-400 focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 resize-none transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_16px_30px_rgba(34,211,238,0.15)]" rows={5} />
@@ -1706,6 +1720,18 @@ export default function CampusAgentApp() {
                   )}
                 </div>
               </div>
+
+              <ComplaintPanel
+                viewerRole="student"
+                complaints={complaints}
+                subject={complaintSubject}
+                description={complaintDescription}
+                onSubjectChange={setComplaintSubject}
+                onDescriptionChange={setComplaintDescription}
+                onSubmit={handleRaiseComplaint}
+                submitting={complaintSubmitting}
+                onDownload={handleDownloadComplaintTicket}
+              />
             </div>
 
             <div className="space-y-8">
@@ -1925,6 +1951,20 @@ export default function CampusAgentApp() {
               )}
             </div>
           )}
+
+          <div className="mt-8">
+            <ComplaintPanel
+              viewerRole="faculty"
+              complaints={complaints}
+              subject={complaintSubject}
+              description={complaintDescription}
+              onSubjectChange={setComplaintSubject}
+              onDescriptionChange={setComplaintDescription}
+              onSubmit={handleRaiseComplaint}
+              submitting={complaintSubmitting}
+              onDownload={handleDownloadComplaintTicket}
+            />
+          </div>
         </main>
 
         <div className="fixed bottom-4 right-4 space-y-2 z-50">
