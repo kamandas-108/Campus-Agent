@@ -42,3 +42,62 @@ CREATE TABLE IF NOT EXISTS documents (
 );
 
 CREATE INDEX IF NOT EXISTS idx_documents_thread_id ON documents(thread_id);
+
+
+-- ─── RBAC & deadline columns added for v3 features ───
+-- If upgrading an existing database, run only the ALTER TABLE statements.
+-- The CREATE TABLE statements here are already idempotent (IF NOT EXISTS).
+
+-- Users table (new — stores role alongside login info)
+CREATE TABLE IF NOT EXISTS users (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name            TEXT NOT NULL,
+    email           TEXT NOT NULL UNIQUE,
+    phone           TEXT,
+    whatsapp        TEXT,
+    department      TEXT,
+    role            TEXT NOT NULL DEFAULT 'student'
+                        CHECK (role IN ('student','faculty','hod','admin')),
+    password_hash   TEXT,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE INDEX IF NOT EXISTS idx_users_role  ON users(role);
+
+-- Requests table (new — persists _requests_store to Postgres)
+-- Mirrors the in-memory dict so dashboards survive restarts.
+CREATE TABLE IF NOT EXISTS requests (
+    id                   TEXT PRIMARY KEY,
+    thread_id            TEXT NOT NULL UNIQUE,
+    student_id           UUID REFERENCES users(id),
+    student_name         TEXT,
+    student_email        TEXT,
+    student_whatsapp     TEXT,
+    student_department   TEXT,
+    assigned_faculty_id  TEXT,
+    assigned_faculty_name TEXT,
+    course_program       TEXT,
+    academic_year        TEXT,
+    roll_number          TEXT,
+    query                TEXT,
+    operation            TEXT,
+    status               TEXT NOT NULL DEFAULT 'PENDING'
+                             CHECK (status IN ('PENDING','APPROVED','REJECTED')),
+    result               TEXT,
+    created_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    approved_at          TIMESTAMP,                          -- NEW
+    deadline_at          TIMESTAMP,                          -- NEW
+    reminder_sent        BOOLEAN DEFAULT FALSE,              -- NEW
+    escalated            BOOLEAN DEFAULT FALSE               -- NEW
+);
+
+CREATE INDEX IF NOT EXISTS idx_requests_student_email ON requests(student_email);
+CREATE INDEX IF NOT EXISTS idx_requests_status        ON requests(status);
+CREATE INDEX IF NOT EXISTS idx_requests_created_at    ON requests(created_at DESC);
+
+-- If upgrading an existing `requests` table, run these instead:
+-- ALTER TABLE requests ADD COLUMN IF NOT EXISTS approved_at   TIMESTAMP;
+-- ALTER TABLE requests ADD COLUMN IF NOT EXISTS deadline_at   TIMESTAMP;
+-- ALTER TABLE requests ADD COLUMN IF NOT EXISTS reminder_sent BOOLEAN DEFAULT FALSE;
+-- ALTER TABLE requests ADD COLUMN IF NOT EXISTS escalated     BOOLEAN DEFAULT FALSE;
