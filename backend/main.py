@@ -22,7 +22,7 @@ from audit_service import CryptographicAuditLogger
 from fastapi_mail import FastMail, MessageSchema, ConnectionConfig, MessageType
 from analytics_service import compute_analytics
 from scheduler import run_scheduler
-from pdf_service import generate_approval_pdf
+from pdf_service import generate_approval_pdf, generate_complaint_ticket_pdf
 
 try:
     from twilio.rest import Client as TwilioClient
@@ -246,7 +246,14 @@ async def _startup_diagnostics():
 # read from this single shared store instead of separate local React state.
 _requests_store: Dict[str, Dict[str, Any]] = {}
 
-ALLOWED_DOCUMENT_EXTENSIONS = {".pdf", ".doc", ".docx", ".jpg", ".jpeg", ".png", ".xls", ".xlsx", ".mp3", ".wav", ".webm", ".m4a", ".ogg", ".flac"}
+# ─── COMPLAINT TICKET STORE ───
+# Keyed by ticket_id. Either a student or a faculty member can raise a
+# complaint ticket; both sides can list and download the resulting PDF.
+# Same in-memory-for-now approach as _requests_store — see the persistence
+# note near the bottom of this file.
+_complaints_store: Dict[str, Dict[str, Any]] = {}
+
+ALLOWED_DOCUMENT_EXTENSIONS = {".pdf", ".doc", ".docx", ".jpg", ".jpeg", ".png", ".xls", ".xlsx"}
 
 
 class DocumentStore:
@@ -532,90 +539,6 @@ async def _send_email_with_attachments(subject: str, recipients: List[str], body
         return False
 
 
-# ─── VOICE FILE HELPERS ───
-async def get_voice_files_for_thread(thread_id: str) -> List[Dict[str, Any]]:
-    """Get all audio files (voice recordings) for a request thread."""
-    docs = await document_store.list_for_thread(thread_id)
-    audio_extensions = {".mp3", ".wav", ".webm", ".m4a", ".ogg", ".flac"}
-    voice_files = [
-        doc for doc in docs
-        if any(doc["filename"].lower().endswith(ext) for ext in audio_extensions)
-    ]
-    return voice_files
-
-
-async def get_voice_file_data(document_id: str) -> Optional[bytes]:
-    """Get the actual file data for a voice recording."""
-    doc = await document_store.get(document_id)
-    if doc and "file_data" in doc:
-        return doc["file_data"]
-    return None
-
-
-async def send_voice_via_telegram(thread_id: str, details: dict, voice_file_id: str, filename: str) -> bool:
-    """Send a voice recording via Telegram to the faculty admin."""
-    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN in ("", "YOUR_TELEGRAM_TOKEN"):
-        return False
-    
-    try:
-        file_data = await get_voice_file_data(voice_file_id)
-        if not file_data:
-            print(f"Voice file {voice_file_id} data not found")
-            return False
-        
-        student = details.get("student_name") or "Not provided"
-        email = details.get("student_email") or "Not provided"
-        program = details.get("course_program") or "Not provided"
-        year = details.get("academic_year") or "Not provided"
-        roll = details.get("roll_number") or "Not provided"
-        operation = details.get("operation") or "?"
-        request_text = details.get("query") or operation
-        
-        # First, send a text message with context
-        caption = (
-            "🎙️ *VOICE REQUEST RECEIVED*\n\n"
-            f"👤 *Student:* {student}\n"
-            f"📧 *Email:* {email}\n"
-            f"🎓 *Program:* {program}\n"
-            f"📚 *Year:* {year}\n"
-            f"🆔 *Roll/Reg No:* {roll}\n\n"
-            f"📋 *Request Type:* {operation}\n"
-            f"📝 *Text Query:* {request_text}\n"
-            f"🔹 *Thread ID:* `{thread_id}`\n\n"
-            "⬇️ Audio recording attached below."
-        )
-        
-        # Send text message first
-        text_payload = {
-            "chat_id": TELEGRAM_ADMIN_CHAT,
-            "text": caption,
-            "parse_mode": "Markdown",
-        }
-        
-        async with httpx.AsyncClient(timeout=10) as client:
-            await client.post(f"{TELEGRAM_API_URL}/sendMessage", json=text_payload)
-        
-        # Now send the voice file
-        files = {"audio": (filename, file_data, "audio/webm")}
-        voice_payload = {
-            "chat_id": TELEGRAM_ADMIN_CHAT,
-            "caption": f"📁 {filename}",
-            "parse_mode": "Markdown",
-        }
-        
-        async with httpx.AsyncClient(timeout=30) as client:
-            await client.post(
-                f"{TELEGRAM_API_URL}/sendAudio",
-                data=voice_payload,
-                files=files
-            )
-        
-        return True
-    except Exception as e:
-        print(f"Telegram voice send error: {e}")
-        return False
-
-
 # ─── TELEGRAM DISPATCH ───
 # Notification-only: this no longer drives approval. The message carries the
 # full student/request context and a link out to the Faculty Dashboard,
@@ -664,14 +587,6 @@ async def send_telegram_approval(thread_id: str, details: dict):
                 print(f"✅ Telegram notification sent for thread {thread_id}")
     except Exception as exc:
         print(f"⚠️  Telegram notification error: {exc}")
-    
-    # Send voice files if available
-    voice_files = await get_voice_files_for_thread(thread_id)
-    for voice_file in voice_files:
-        try:
-            await send_voice_via_telegram(thread_id, details, voice_file["id"], voice_file["filename"])
-        except Exception as e:
-            print(f"Failed to send voice file to Telegram: {e}")
 
 #  ─── WHATSAPP DISPATCH ───
 # Uses free-form body messages — no Content Template required.
@@ -838,36 +753,11 @@ async def send_email_approval(thread_id: str, details: dict):
     </div>
     """
     
-    # Get voice files to attach
-    attachments = []
-    try:
-        voice_files = await get_voice_files_for_thread(thread_id)
-        for voice_file in voice_files:
-            try:
-                file_data = await get_voice_file_data(voice_file["id"])
-                if file_data:
-                    attachments.append((voice_file["filename"], file_data, voice_file.get("content_type", "audio/webm")))
-                    # Add note to email body about the attachment
-                    body += f"<p style='color:#059669;font-size:14px;margin-top:12px'>🎙️ <b>Voice Recording Attached:</b> {voice_file['filename']}</p>"
-            except Exception as e:
-                print(f"Failed to attach voice file: {e}")
-    except Exception as e:
-        print(f"Failed to get voice files: {e}")
-    
-    # Send email with or without attachments
-    if attachments:
-        await _send_email_with_attachments(
-            f"[Campus Agent] Approval Required — {thread_id}",
-            recipients,
-            body,
-            attachments
-        )
-    else:
-        await _send_email(
-            f"[Campus Agent] Approval Required — {thread_id}",
-            recipients,
-            body,
-        )
+    await _send_email(
+        f"[Campus Agent] Approval Required — {thread_id}",
+        recipients,
+        body,
+    )
 
 # ─── TRANSLATION HELPERS (Google Translate free endpoint) ───
 LANG_CODE_MAP = {
@@ -924,6 +814,14 @@ class ApprovalModel(BaseModel):
     student_email: Optional[str] = None
     student_whatsapp: Optional[str] = None
     request_summary: Optional[str] = None
+
+class ComplaintModel(BaseModel):
+    subject:         str
+    description:     str
+    raised_by:       Literal["student", "faculty"]
+    raised_by_name:  Optional[str] = None
+    raised_by_email: Optional[str] = None
+    thread_id:       Optional[str] = None   # optional link to a related request
 
 class TranslateModel(BaseModel):
     text:      str
@@ -1105,6 +1003,67 @@ async def delete_document(document_id: str):
     except Exception:
         pass
     return {"status": "deleted", "document_id": document_id}
+
+# ── Complaint tickets (raised by either student or faculty; both can download) ──
+@app.post("/api/complaint")
+async def raise_complaint(req: ComplaintModel):
+    ticket_id = "TCK-" + uuid.uuid4().hex[:8].upper()
+    record: Dict[str, Any] = {
+        "ticket_id": ticket_id,
+        "id": ticket_id,
+        "subject": req.subject,
+        "description": req.description,
+        "raised_by": req.raised_by,
+        "raised_by_name": req.raised_by_name,
+        "raised_by_email": req.raised_by_email,
+        "thread_id": req.thread_id,
+        "status": "OPEN",
+        "created_at": datetime.utcnow().isoformat() + "Z",
+    }
+    _complaints_store[ticket_id] = record
+
+    try:
+        await audit_logger.log_decision(
+            req.thread_id or ticket_id, req.raised_by_email or req.raised_by, "RAISED",
+            "COMPLAINT_TICKET", {"ticket_id": ticket_id, "subject": req.subject},
+        )
+    except Exception:
+        pass
+
+    return {"status": "success", "ticket": record}
+
+
+@app.get("/api/complaints")
+async def get_complaints(raised_by_email: Optional[str] = Query(default=None)):
+    """List complaint tickets. Pass raised_by_email to scope to one person's
+    own tickets (used by the student dashboard); omit it to see all tickets
+    (used by the faculty dashboard)."""
+    items = list(_complaints_store.values())
+    if raised_by_email:
+        items = [c for c in items if c.get("raised_by_email") == raised_by_email]
+    items.sort(key=lambda c: c.get("created_at", ""), reverse=True)
+    for item in items:
+        item["download_url"] = f"{PUBLIC_API_URL}/api/complaint/{item['ticket_id']}/pdf"
+    return {"complaints": items}
+
+
+@app.get("/api/complaint/{ticket_id}/pdf")
+async def download_complaint_pdf(ticket_id: str):
+    """Generate and return a downloadable PDF for a complaint ticket."""
+    ticket = _complaints_store.get(ticket_id)
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Complaint ticket not found")
+    try:
+        pdf_bytes = generate_complaint_ticket_pdf(ticket)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    filename = f"complaint-{ticket_id}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
 
 async def _apply_decision(
     thread_id: str,
